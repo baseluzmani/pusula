@@ -256,3 +256,155 @@ def map_rows(status: str = "all", search: str = "",
         params.append(f"%{search_group.upper()}%")
     sql += " ORDER BY name LIMIT 500"
     return db.query(sql, tuple(params))
+
+
+# --- Comparison ----------------------------------------------------------
+# One engine for both cases: same ETF at two dates (change over time), or two
+# ETFs at their latest dates (cross-sectional difference).
+
+MIN_WEIGHT = 0.0   # set >0 to ignore tiny positions
+
+
+def compare(etf_a: str, date_a: str, etf_b: str, date_b: str,
+            min_weight: float = MIN_WEIGHT) -> dict:
+    """
+    Diff two holdings snapshots.
+
+    Returns a dict with:
+      a, b            - the two consolidated frames
+      common          - DataFrame: canonical_id, name, sector, weight_a,
+                        weight_b, delta   (sorted by |delta| desc)
+      only_a, only_b  - DataFrames of positions unique to one side
+      overlap         - sum of min(weight_a, weight_b), the true overlap
+      same_fund       - True when both sides are the same ETF
+    """
+    a = holdings(etf_a, date_a)
+    b = holdings(etf_b, date_b)
+
+    if min_weight:
+        a = a[a["weight_pct"] >= min_weight]
+        b = b[b["weight_pct"] >= min_weight]
+
+    ia = a.set_index("canonical_id")
+    ib = b.set_index("canonical_id")
+    keys_a, keys_b = set(ia.index), set(ib.index)
+    shared = keys_a & keys_b
+
+    common = pd.DataFrame([{
+        "canonical_id": k,
+        "name": ia.at[k, "name"] or ib.at[k, "name"],
+        "sector": ia.at[k, "sector"],
+        "weight_a": float(ia.at[k, "weight_pct"] or 0),
+        "weight_b": float(ib.at[k, "weight_pct"] or 0),
+    } for k in shared])
+
+    if not common.empty:
+        common["delta"] = common["weight_b"] - common["weight_a"]
+        common = common.sort_values("delta", key=abs, ascending=False)
+        overlap = float(common[["weight_a", "weight_b"]].min(axis=1).sum())
+    else:
+        overlap = 0.0
+
+    return {
+        "a": a, "b": b,
+        "common": common,
+        "only_a": a[a["canonical_id"].isin(keys_a - keys_b)],
+        "only_b": b[b["canonical_id"].isin(keys_b - keys_a)],
+        "overlap": overlap,
+        "same_fund": etf_a == etf_b,
+    }
+
+
+def top_n(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
+    return df.sort_values("weight_pct", ascending=False).head(n)
+
+
+# --- Changes between two snapshots ---------------------------------------
+
+def changes(etf_id: str, date_from: str, date_to: str,
+            min_weight: float = 0.5) -> dict[str, pd.DataFrame]:
+    """
+    Compare two snapshots of the same ETF.
+
+    Returns four frames keyed 'new', 'removed', 'increased', 'decreased'.
+    Holdings below min_weight are ignored, so trivial rounding moves in the
+    long tail don't swamp the result.
+    """
+    a = holdings(etf_id, date_from)
+    b = holdings(etf_id, date_to)
+    if a.empty or b.empty:
+        empty = pd.DataFrame(columns=["canonical_id", "name", "weight_from",
+                                      "weight_to", "change"])
+        return {k: empty.copy() for k in ("new", "removed", "increased", "decreased")}
+
+    a = a[a["weight_pct"] >= min_weight]
+    b = b[b["weight_pct"] >= min_weight]
+
+    merged = a.merge(b, on="canonical_id", how="outer",
+                     suffixes=("_from", "_to"), indicator=True)
+    merged["name"] = merged["name_to"].fillna(merged["name_from"])
+    merged = merged.rename(columns={"weight_pct_from": "weight_from",
+                                    "weight_pct_to": "weight_to"})
+    merged["change"] = merged["weight_to"].fillna(0) - merged["weight_from"].fillna(0)
+
+    cols = ["canonical_id", "name", "weight_from", "weight_to", "change"]
+    both = merged["_merge"] == "both"
+
+    return {
+        "new": merged[merged["_merge"] == "right_only"][cols]
+                 .sort_values("weight_to", ascending=False),
+        "removed": merged[merged["_merge"] == "left_only"][cols]
+                 .sort_values("weight_from", ascending=False),
+        "increased": merged[both & (merged["change"] > 0)][cols]
+                 .sort_values("change", ascending=False),
+        "decreased": merged[both & (merged["change"] < 0)][cols]
+                 .sort_values("change"),
+    }
+
+
+# --- Compare two ETFs ----------------------------------------------------
+
+def compare(etf_a: str, etf_b: str) -> dict:
+    """
+    Side-by-side comparison of the latest snapshot of two ETFs.
+
+    Portfolio overlap is the sum of min(weight_a, weight_b) across common
+    holdings - the share of capital genuinely invested in the same names.
+    """
+    date_a, date_b = latest_date(etf_a), latest_date(etf_b)
+    if not date_a or not date_b:
+        return {}
+
+    a, b = holdings(etf_a, date_a), holdings(etf_b, date_b)
+    if a.empty or b.empty:
+        return {}
+
+    merged = a.merge(b, on="canonical_id", how="outer",
+                     suffixes=("_a", "_b"), indicator=True)
+    merged["name"] = merged["name_a"].fillna(merged["name_b"])
+    merged["sector"] = merged["sector_a"].fillna(merged["sector_b"])
+    merged = merged.rename(columns={"weight_pct_a": "weight_a",
+                                    "weight_pct_b": "weight_b"})
+    merged["diff"] = merged["weight_a"].fillna(0) - merged["weight_b"].fillna(0)
+
+    cols = ["canonical_id", "name", "sector", "weight_a", "weight_b", "diff"]
+    common = merged[merged["_merge"] == "both"][cols].copy()
+    common["avg"] = (common["weight_a"] + common["weight_b"]) / 2
+    common = common.sort_values("avg", ascending=False).drop(columns="avg")
+
+    only_a = (merged[merged["_merge"] == "left_only"][cols]
+              .sort_values("weight_a", ascending=False))
+    only_b = (merged[merged["_merge"] == "right_only"][cols]
+              .sort_values("weight_b", ascending=False))
+
+    overlap = float(common[["weight_a", "weight_b"]].min(axis=1).sum()) if not common.empty else 0.0
+
+    return {
+        "date_a": date_a, "date_b": date_b,
+        "holdings_a": a, "holdings_b": b,
+        "common": common, "only_a": only_a, "only_b": only_b,
+        "overlap": overlap,
+        "top10_a": a.head(10), "top10_b": b.head(10),
+        "top10_weight_a": float(a.head(10)["weight_pct"].sum()),
+        "top10_weight_b": float(b.head(10)["weight_pct"].sum()),
+    }

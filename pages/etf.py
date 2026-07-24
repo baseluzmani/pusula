@@ -5,14 +5,33 @@ import plotly.graph_objects as go
 
 from core import theme, reference
 from core.repo import etf as repo
+from core.repo import funds as funds_repo
 from ui import figures
-from ui.layout import page_header, subtabs, card, placeholder
+from ui.layout import subtabs, card, placeholder
 
 dash.register_page(__name__, path="/etf", name="ETF", order=4)
 
-TABS = ["Holdings", "Overlap", "Changes", "Compare", "Ticker map", "Sources"]
+TABS = ["Holdings", "Changes", "Compare", "Fund compare", "Ticker map", "Sources"]
+
+# One line per tab, explaining what this tab does that the others don't.
+# Leave a tab out entirely if its name is self-explanatory.
+TAB_INTRO = {
+    "Holdings": "What a fund owns on a given date, consolidated by FIGI so a "
+                "company held under several tickers counts once.",
+    "Changes": "What the manager bought, sold, added to and trimmed between "
+               "two snapshot dates.",
+    "Compare": "Where two funds hold the same names, and how much capital "
+               "genuinely sits in the same companies.",
+    "Fund compare": "Any two holdings sets side by side - ETF, pension fund, "
+                    "or a composite blended from several funds.",
+    "Ticker map": "The identifier table tying provider tickers, ISINs and "
+                  "SEDOLs to a single FIGI. Everything else depends on it.",
+    "Sources": "Where each fund's holdings file comes from.",
+}
 
 TREND_TOP_N = 20
+MIN_CHANGE_WEIGHT = 0.5     # ignore long-tail noise in Changes
+COMPARE_HEATMAP_N = 30
 
 
 def _etf_options():
@@ -32,12 +51,7 @@ def _control(label, component, width="220px"):
 
 layout = html.Div([
     subtabs("etf-tabs", TABS),
-    html.Div([
-        page_header("ETF and fund holdings",
-                    "Look-through holdings consolidated by FIGI, so the same "
-                    "company held under different tickers counts once."),
-        html.Div(id="etf-body"),
-    ], style=theme.PAGE),
+    html.Div(html.Div(id="etf-body"), style=theme.PAGE),
 ])
 
 
@@ -77,11 +91,11 @@ def _stat(label, value, sub=""):
               "padding": "14px 16px"})
 
 
-def _weight_bar(weight, max_weight):
+def _weight_bar(weight, max_weight, colour="#2E75B6"):
     pct = (weight or 0) / (max_weight or 1) * 100
     return html.Div([
         html.Div(style={"width": f"{pct:.0f}%", "height": "6px",
-                        "backgroundColor": "#2E75B6", "borderRadius": "3px",
+                        "backgroundColor": colour, "borderRadius": "3px",
                         "minWidth": "1px"}),
         html.Span(f"{weight:.2f}%" if weight is not None else "-",
                   style={"marginLeft": "10px", "fontSize": "12px",
@@ -196,8 +210,337 @@ def _holdings(etf_id, date):
     return stats, table, heat, line
 
 
+# --- Changes tab ---------------------------------------------------------
+
+def _changes_view():
+    options = _etf_options()
+    default = options[0]["value"] if options else None
+    return html.Div([
+        html.Div([
+            _control("ETF", dcc.Dropdown(id="etf-c-fund", options=options,
+                                         value=default, clearable=False)),
+            _control("From", dcc.Dropdown(id="etf-c-from", clearable=False), "190px"),
+            _control("To", dcc.Dropdown(id="etf-c-to", clearable=False), "190px"),
+        ], style={"display": "flex", "alignItems": "flex-end",
+                  "marginBottom": "18px", "flexWrap": "wrap"}),
+        html.Div(id="etf-c-body"),
+    ])
+
+
+def _change_section(title, df, accent, show_delta):
+    n = len(df)
+    if n == 0:
+        body = html.Div("None", style={"color": theme.NEUTRAL, "fontSize": "12.5px"})
+    else:
+        if show_delta:
+            head = html.Thead(html.Tr([
+                html.Th("Name"), html.Th("From"), html.Th("To"), html.Th("Change")]))
+            rows = [html.Tr([
+                html.Td(r.name, style={"fontWeight": 500}),
+                html.Td(f"{r.weight_from:.2f}%", className="num",
+                        style={"color": theme.SLATE}),
+                html.Td(f"{r.weight_to:.2f}%", className="num"),
+                html.Td(f"{r.change:+.2f}%", className="num",
+                        style={"color": theme.colour_for(r.change), "fontWeight": 600}),
+            ]) for r in df.itertuples()]
+        else:
+            weight_col = "weight_to" if "new" in title.lower() else "weight_from"
+            head = html.Thead(html.Tr([html.Th("Name"), html.Th("Weight")]))
+            rows = [html.Tr([
+                html.Td(r.name, style={"fontWeight": 500}),
+                html.Td(f"{getattr(r, weight_col):.2f}%", className="num",
+                        style={"color": accent, "fontWeight": 600}),
+            ]) for r in df.itertuples()]
+        body = html.Div(html.Table([head, html.Tbody(rows)], className="pz"),
+                        style={"overflowX": "auto"})
+
+    return html.Div([
+        html.Div(f"{title} ({n})", style={**theme.CARD_TITLE, "color": accent}),
+        body,
+    ], style={**theme.CARD, "borderLeft": f"3px solid {accent}", "borderRadius": "0 6px 6px 0"})
+
+
+@callback(
+    Output("etf-c-from", "options"), Output("etf-c-from", "value"),
+    Output("etf-c-to", "options"), Output("etf-c-to", "value"),
+    Input("etf-c-fund", "value"),
+)
+def _change_dates(etf_id):
+    if not etf_id:
+        return [], None, [], None
+    dates = repo.list_dates(etf_id)
+    opts = [{"label": d, "value": d} for d in dates]
+    frm = dates[1] if len(dates) > 1 else (dates[0] if dates else None)
+    return opts, frm, opts, (dates[0] if dates else None)
+
+
+@callback(
+    Output("etf-c-body", "children"),
+    Input("etf-c-fund", "value"), Input("etf-c-from", "value"),
+    Input("etf-c-to", "value"),
+)
+def _changes(etf_id, date_from, date_to):
+    if not etf_id or not date_from or not date_to or date_from == date_to:
+        return placeholder("Select an ETF and two different dates.")
+
+    c = repo.changes(etf_id, date_from, date_to, MIN_CHANGE_WEIGHT)
+    row = {"display": "flex", "gap": "14px", "flexWrap": "wrap"}
+    half = {"flex": "1", "minWidth": "320px"}
+
+    return html.Div([
+        html.Div(f"{reference.short_name(etf_id)}   {date_from} to {date_to}   "
+                 f"(holdings below {MIN_CHANGE_WEIGHT}% excluded)",
+                 style={"fontSize": "12.5px", "color": theme.SLATE,
+                        "marginBottom": "14px"}),
+        html.Div([
+            html.Div(_change_section("New positions", c["new"],
+                                     theme.POSITIVE, False), style=half),
+            html.Div(_change_section("Removed positions", c["removed"],
+                                     theme.NEGATIVE, False), style=half),
+        ], style=row),
+        html.Div([
+            html.Div(_change_section("Increased", c["increased"],
+                                     "#2E75B6", True), style=half),
+            html.Div(_change_section("Decreased", c["decreased"],
+                                     theme.NEEDLE, True), style=half),
+        ], style=row),
+    ])
+
+
+# --- Compare tab ---------------------------------------------------------
+
+def _compare_view():
+    options = _etf_options()
+    a = options[0]["value"] if options else None
+    b = options[1]["value"] if len(options) > 1 else None
+    return html.Div([
+        html.Div([
+            _control("ETF A", dcc.Dropdown(id="etf-cmp-a", options=options,
+                                           value=a, clearable=False)),
+            _control("ETF B", dcc.Dropdown(id="etf-cmp-b", options=options,
+                                           value=b, clearable=False)),
+        ], style={"display": "flex", "alignItems": "flex-end",
+                  "marginBottom": "18px", "flexWrap": "wrap"}),
+        html.Div(id="etf-cmp-body"),
+    ])
+
+
+def _simple_table(df, weight_col, accent, numbered=False):
+    if df.empty:
+        return html.Div("None", style={"color": theme.NEUTRAL, "fontSize": "12.5px"})
+    headers = ([html.Th("#", style={"width": "34px"})] if numbered else []) + \
+              [html.Th("Name"), html.Th("Weight", style={"width": "90px"})]
+    rows = []
+    for i, r in enumerate(df.itertuples(), start=1):
+        cells = ([html.Td(i, className="num",
+                          style={"color": theme.NEUTRAL})] if numbered else [])
+        cells += [
+            html.Td(r.name, style={"fontWeight": 500}),
+            html.Td(f"{getattr(r, weight_col):.2f}%", className="num",
+                    style={"color": accent, "fontWeight": 600}),
+        ]
+        rows.append(html.Tr(cells))
+    return html.Div(html.Table([html.Thead(html.Tr(headers)), html.Tbody(rows)],
+                               className="pz"), style={"overflowX": "auto"})
+
+
+def _common_table(df, name_a, name_b):
+    if df.empty:
+        return html.Div("No common holdings.",
+                        style={"color": theme.NEUTRAL, "fontSize": "12.5px"})
+    max_w = max(df["weight_a"].max(), df["weight_b"].max()) or 1
+    head = html.Thead(html.Tr([
+        html.Th("#", style={"width": "34px"}),
+        html.Th("Name"), html.Th("Sector"),
+        html.Th(name_a, style={"width": "160px"}),
+        html.Th(name_b, style={"width": "160px"}),
+        html.Th("A - B", style={"width": "80px"}),
+    ]))
+    rows = []
+    for i, r in enumerate(df.itertuples(), start=1):
+        sector = r.sector if r.sector and str(r.sector) != "nan" else "-"
+        rows.append(html.Tr([
+            html.Td(i, className="num", style={"color": theme.NEUTRAL}),
+            html.Td(r.name, style={"fontWeight": 500}),
+            html.Td(sector, style={"color": theme.SLATE}),
+            html.Td(_weight_bar(r.weight_a, max_w)),
+            html.Td(_weight_bar(r.weight_b, max_w, theme.NEEDLE)),
+            html.Td(f"{r.diff:+.2f}%", className="num",
+                    style={"color": theme.colour_for(r.diff), "fontWeight": 600}),
+        ]))
+    return html.Div(html.Table([head, html.Tbody(rows)], className="pz"),
+                    style={"overflowX": "auto"})
+
+
+@callback(
+    Output("etf-cmp-body", "children"),
+    Input("etf-cmp-a", "value"), Input("etf-cmp-b", "value"),
+)
+def _compare(etf_a, etf_b):
+    if not etf_a or not etf_b or etf_a == etf_b:
+        return placeholder("Select two different ETFs.")
+
+    c = repo.compare(etf_a, etf_b)
+    if not c:
+        return placeholder("No holdings data for one of these ETFs.")
+
+    na, nb = reference.short_name(etf_a), reference.short_name(etf_b)
+
+    stats = html.Div([
+        _stat("Common", f"{len(c['common']):,}", "held by both"),
+        _stat(f"Only {na}", f"{len(c['only_a']):,}",
+              f"{len(c['holdings_a'])} total"),
+        _stat(f"Only {nb}", f"{len(c['only_b']):,}",
+              f"{len(c['holdings_b'])} total"),
+        _stat("Overlap", f"{c['overlap']:.1f}%", "sum of min(A, B)"),
+        _stat(f"Top 10 {na}", f"{c['top10_weight_a']:.1f}%", "concentration"),
+        _stat(f"Top 10 {nb}", f"{c['top10_weight_b']:.1f}%", "concentration"),
+    ], style={"display": "flex", "gap": "12px", "flexWrap": "wrap",
+              "marginBottom": "18px"})
+
+    half = {"flex": "1", "minWidth": "320px"}
+    top10 = html.Div([
+        html.Div(card(f"Top 10 - {na} ({c['top10_weight_a']:.1f}% of fund)",
+                      _simple_table(c["top10_a"], "weight_pct", "#2E75B6", True)),
+                 style=half),
+        html.Div(card(f"Top 10 - {nb} ({c['top10_weight_b']:.1f}% of fund)",
+                      _simple_table(c["top10_b"], "weight_pct", theme.NEEDLE, True)),
+                 style=half),
+    ], style={"display": "flex", "gap": "14px", "flexWrap": "wrap"})
+
+    only = html.Div([
+        html.Div(card(f"Only in {na} ({len(c['only_a'])})",
+                      _simple_table(c["only_a"], "weight_a", "#2E75B6")),
+                 style=half),
+        html.Div(card(f"Only in {nb} ({len(c['only_b'])})",
+                      _simple_table(c["only_b"], "weight_b", theme.NEEDLE)),
+                 style=half),
+    ], style={"display": "flex", "gap": "14px", "flexWrap": "wrap"})
+
+    heat = figures.empty()
+    if not c["common"].empty:
+        top = c["common"].head(COMPARE_HEATMAP_N).copy()
+        top = top.iloc[::-1]
+        heat = go.Figure(go.Heatmap(
+            z=top[["weight_a", "weight_b"]].values, x=[na, nb],
+            y=[str(n)[:34] for n in top["name"]],
+            colorscale=figures.HEATMAP_SCALE,
+            hovertemplate="<b>%{y}</b><br>%{x}: %{z:.2f}%<extra></extra>",
+            colorbar=dict(title="Weight %", thickness=10, outlinewidth=0),
+        ))
+        heat.update_layout(**figures.base_layout(
+            height=max(300, len(top) * 22 + 90),
+            margin=dict(l=210, r=60, t=14, b=40),
+            yaxis=dict(automargin=True),
+        ))
+
+    return html.Div([
+        html.Div(f"Latest snapshot - {na}: {c['date_a']}   |   {nb}: {c['date_b']}",
+                 style={"fontSize": "12.5px", "color": theme.SLATE,
+                        "marginBottom": "14px"}),
+        stats,
+        top10,
+        card("Common holdings", _common_table(c["common"], na, nb)),
+        only,
+        card(f"Overlap heatmap - top {COMPARE_HEATMAP_N} common holdings",
+             dcc.Graph(figure=heat, config={"displayModeBar": False})),
+    ])
+
+
+# --- Fund compare tab ----------------------------------------------------
+
+def _fund_compare_view():
+    options = funds_repo.options()
+    _, latest = funds_repo.date_bounds()
+    return html.Div([
+        html.Div([
+            _control("As of", dcc.DatePickerSingle(
+                id="etf-fc-date", date=latest, display_format="YYYY-MM-DD",
+                style={"width": "100%"}), "170px"),
+            _control("Left", dcc.Dropdown(id="etf-fc-a", options=options,
+                                          placeholder="Select a fund"), "300px"),
+            _control("Right", dcc.Dropdown(id="etf-fc-b", options=options,
+                                           placeholder="Select a fund"), "300px"),
+        ], style={"display": "flex", "alignItems": "flex-end",
+                  "marginBottom": "18px", "flexWrap": "wrap"}),
+        html.Div(id="etf-fc-body"),
+    ])
+
+
+def _fc_table(df, accent):
+    if df.empty:
+        return html.Div("No holdings for this date.",
+                        style={"color": theme.NEUTRAL, "fontSize": "12.5px"})
+    head = html.Thead(html.Tr([
+        html.Th("#", style={"width": "34px"}),
+        html.Th("Company"),
+        html.Th("Ticker", style={"width": "110px"}),
+        html.Th("Weight", style={"width": "90px"}),
+    ]))
+    rows = [html.Tr([
+        html.Td(r.rank, className="num", style={"color": theme.NEUTRAL}),
+        html.Td(r.name, style={"fontWeight": 500}),
+        html.Td(str(r.ticker or "-")[:14],
+                style={"color": theme.NEUTRAL, "fontSize": "11px", **theme.NUM}),
+        html.Td(f"{r.weight_pct:.2f}%", className="num",
+                style={"color": accent, "fontWeight": 600}),
+    ]) for r in df.itertuples()]
+
+    total = df["weight_pct"].sum()
+    rows.append(html.Tr([
+        html.Td("", colSpan=3),
+        html.Td(f"{total:.1f}%", className="num",
+                style={"fontWeight": 600, "borderTop": f"2px solid {theme.LINE}"}),
+    ]))
+    return html.Div(html.Table([head, html.Tbody(rows)], className="pz"),
+                    style={"maxHeight": "620px", "overflowY": "auto"})
+
+
+def _fc_side(df, name, date, as_of, accent):
+    stale = date and as_of and date < as_of
+    return card(
+        name,
+        html.Div([
+            html.Span(f"As of {date}" if date else "No data"),
+            html.Span("  (latest available on or before the selected date)"
+                      if stale else "",
+                      style={"color": theme.NEEDLE}),
+        ], style={"fontSize": "11.5px", "color": theme.SLATE,
+                  "marginBottom": "10px", **theme.NUM}),
+        _fc_table(df, accent),
+    )
+
+
+@callback(
+    Output("etf-fc-body", "children"),
+    Input("etf-fc-a", "value"), Input("etf-fc-b", "value"),
+    Input("etf-fc-date", "date"),
+)
+def _fund_compare(sel_a, sel_b, as_of):
+    if not sel_a and not sel_b:
+        return placeholder("Select a fund on either side.")
+
+    df_a, name_a, date_a = funds_repo.holdings_for(sel_a, as_of)
+    df_b, name_b, date_b = funds_repo.holdings_for(sel_b, as_of)
+
+    half = {"flex": "1", "minWidth": "340px"}
+    return html.Div([
+        html.Div(_fc_side(df_a, name_a, date_a, as_of, "#2E75B6"), style=half),
+        html.Div(_fc_side(df_b, name_b, date_b, as_of, theme.NEEDLE), style=half),
+    ], style={"display": "flex", "gap": "14px", "flexWrap": "wrap"})
+
+
 @callback(Output("etf-body", "children"), Input("etf-tabs", "value"))
 def _render(tab):
-    if tab == "Holdings":
-        return _holdings_view()
-    return placeholder(f"{tab} - not migrated yet")
+    views = {
+        "Holdings": _holdings_view,
+        "Changes": _changes_view,
+        "Compare": _compare_view,
+        "Fund compare": _fund_compare_view,
+    }
+    intro = TAB_INTRO.get(tab, "")
+    body = views[tab]() if tab in views else placeholder(f"{tab} - not migrated yet")
+    return html.Div([
+        html.P(intro, style=theme.SUBTITLE) if intro else None,
+        body,
+    ])
