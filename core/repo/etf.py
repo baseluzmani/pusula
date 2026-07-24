@@ -561,14 +561,3 @@ def map_mark_empty(figi: str, fields: dict, group_figi: str | None) -> None:
           values["isin"], figi))
     clear_cache()
 
-
-def map_auto_approve() -> int:
-    """Mark reviewed every unreviewed row that already has a FIGI and Yahoo ID."""
-    n = db.execute("""
-        UPDATE stock_identifier_map SET reviewed = 1
-        WHERE (reviewed = 0 OR reviewed IS NULL)
-          AND figi IS NOT NULL AND figi NOT LIKE 'UNRESOLVED%'
-          AND yahoo_id IS NOT NULL AND yahoo_id != ''
-    """)
-    clear_cache()
-    return n

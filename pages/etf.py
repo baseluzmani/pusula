@@ -560,12 +560,7 @@ def _button(label, id_, primary=False):
 
 def _map_view():
     return html.Div([
-        html.Div([
-            html.Div(id="etf-m-summary", style={"flex": "1"}),
-            _button("Approve all with FIGI + Yahoo ID", "etf-m-auto", primary=True),
-        ], style={**theme.CARD, "display": "flex", "alignItems": "center",
-                  "justifyContent": "space-between", "gap": "16px"}),
-
+        html.Div(id="etf-m-summary", style={"marginBottom": "16px"}),
         html.Div([
             _control("Show", dcc.Dropdown(id="etf-m-status", options=MAP_FILTERS,
                                           value="unreviewed", clearable=False), "185px"),
@@ -768,7 +763,7 @@ def _edit_panel(figi, _refresh):
 
 @callback(
     Output("etf-m-refresh", "data"), Output("etf-m-feedback", "children"),
-    Input("etf-m-auto", "n_clicks"), Input("etf-m-save", "n_clicks"),
+    Input("etf-m-save", "n_clicks"),
     Input("etf-m-empty", "n_clicks"),
     State("etf-m-selected", "data"), State("etf-m-refresh", "data"),
     State("etf-m-f-figi", "value"), State("etf-m-f-name", "value"),
@@ -778,7 +773,7 @@ def _edit_panel(figi, _refresh):
     State("etf-m-f-notes", "value"),
     prevent_initial_call=True,
 )
-def _map_actions(auto_n, save_n, empty_n, selected, refresh,
+def _map_actions(save_n, empty_n, selected, refresh,
                  figi, name, bbg, raw, sedol, isin, yahoo, group, notes):
     triggered = ctx.triggered_id
     if not triggered:
@@ -787,10 +782,6 @@ def _map_actions(auto_n, save_n, empty_n, selected, refresh,
     fields = {"name": name, "bloomberg_code": bbg, "raw_ticker": raw,
               "sedol": sedol, "isin": isin, "notes": notes}
     try:
-        if triggered == "etf-m-auto":
-            n = repo.map_auto_approve()
-            return refresh + 1, _feedback(f"Approved {n:,} records.")
-
         if not selected:
             return no_update, _feedback("Select a row first.", ok=False)
 
