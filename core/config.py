@@ -13,9 +13,9 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 # --- Database ------------------------------------------------------------
-# Development points at the local copy. At cutover, change this one line.
-DB_PATH = ROOT / "data" / "funds.db"
-# DB_PATH = Path.home() / "FTScrapper" / "data" / "funds.db"   # live
+# Single shared file, also used by the legacy dashboards.
+# ADDITIVE SCHEMA CHANGES ONLY while both are running.
+DB_PATH = Path.home() / "FTScrapper" / "data" / "funds.db"
 
 # --- Folders -------------------------------------------------------------
 INBOX_DIR = ROOT / "inbox"          # drop provider files here for importers
