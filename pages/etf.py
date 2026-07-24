@@ -1,9 +1,9 @@
 import dash
-from dash import html, dcc, callback, Input, Output
+from dash import html, dcc, callback, Input, Output, State, ctx, no_update
 
 import plotly.graph_objects as go
 
-from core import theme, reference
+from core import theme, reference, config, universe
 from core.repo import etf as repo
 from core.repo import funds as funds_repo
 from ui import figures
@@ -530,6 +530,376 @@ def _fund_compare(sel_a, sel_b, as_of):
     ], style={"display": "flex", "gap": "14px", "flexWrap": "wrap"})
 
 
+# --- Ticker map tab ------------------------------------------------------
+
+MAP_FILTERS = [
+    {"label": "Unreviewed only", "value": "unreviewed"},
+    {"label": "All records", "value": "all"},
+    {"label": "Reviewed only", "value": "reviewed"},
+    {"label": "Missing Yahoo ID", "value": "empty"},
+    {"label": "Has Yahoo ID", "value": "has_yahoo"},
+]
+
+
+def _text_input(id_, placeholder, width="100%"):
+    return dcc.Input(id=id_, type="text", placeholder=placeholder, debounce=True,
+                     style={"width": width, "padding": "6px 9px", "fontSize": "13px",
+                            "border": f"1px solid {theme.LINE}", "borderRadius": "4px"})
+
+
+def _button(label, id_, primary=False):
+    base = {"padding": "7px 15px", "borderRadius": "4px", "fontSize": "12.5px",
+            "fontWeight": 600, "cursor": "pointer", "border": "none"}
+    if primary:
+        base |= {"backgroundColor": theme.POSITIVE, "color": "#fff"}
+    else:
+        base |= {"backgroundColor": theme.SURFACE, "color": theme.TEXT,
+                 "border": f"1px solid {theme.LINE}"}
+    return html.Button(label, id=id_, n_clicks=0, style=base)
+
+
+def _map_view():
+    return html.Div([
+        html.Div([
+            html.Div(id="etf-m-summary", style={"flex": "1"}),
+            _button("Approve all with FIGI + Yahoo ID", "etf-m-auto", primary=True),
+        ], style={**theme.CARD, "display": "flex", "alignItems": "center",
+                  "justifyContent": "space-between", "gap": "16px"}),
+
+        html.Div([
+            _control("Show", dcc.Dropdown(id="etf-m-status", options=MAP_FILTERS,
+                                          value="unreviewed", clearable=False), "185px"),
+            _control("Name or ticker", _text_input("etf-m-search", "filter..."), "200px"),
+            _control("Yahoo ID", _text_input("etf-m-yahoo", "e.g. NVDA or .KS"), "160px"),
+            _control("Group FIGI", _text_input("etf-m-group", "e.g. BBG000BCY2S8"), "180px"),
+        ], style={"display": "flex", "alignItems": "flex-end", "flexWrap": "wrap",
+                  "marginBottom": "14px"}),
+
+        html.Div(id="etf-m-feedback", style={"marginBottom": "10px"}),
+        html.Div(id="etf-m-edit", style={"marginBottom": "14px"}),
+        card("Identifier records", html.Div(id="etf-m-table")),
+
+        dcc.Store(id="etf-m-selected", data=None),
+        dcc.Store(id="etf-m-figis", data=[]),
+        dcc.Store(id="etf-m-refresh", data=0),
+    ])
+
+
+def _feedback(message, ok=True):
+    colour = theme.POSITIVE if ok else theme.NEGATIVE
+    return html.Div(message, style={
+        "padding": "9px 14px", "borderRadius": "4px", "fontSize": "12.5px",
+        "fontWeight": 500, "color": colour,
+        "border": f"1px solid {colour}44", "background": f"{colour}0D"})
+
+
+def _cell(value, dash_if_empty=True):
+    text = str(value) if value is not None else ""
+    if text.lower() in ("nan", "none", ""):
+        return "-" if dash_if_empty else ""
+    return text
+
+
+@callback(
+    Output("etf-m-summary", "children"),
+    Output("etf-m-table", "children"),
+    Output("etf-m-figis", "data"),
+    Input("etf-m-status", "value"), Input("etf-m-search", "value"),
+    Input("etf-m-yahoo", "value"), Input("etf-m-group", "value"),
+    Input("etf-m-refresh", "data"),
+)
+def _map_table(status, search, yahoo, group, _refresh):
+    s = repo.map_summary()
+    summary = html.Div([
+        _pill(f"{s['total']:,}", "total", theme.TEXT),
+        _pill(f"{s['unreviewed']:,}", "unreviewed", theme.NEEDLE),
+        _pill(f"{s['reviewed']:,}", "reviewed", theme.POSITIVE),
+    ], style={"display": "flex", "gap": "26px", "alignItems": "center"})
+
+    df = repo.map_records(status, search or "", yahoo or "", group or "",
+                          config.MAP_ROW_LIMIT)
+    if df.empty:
+        return summary, placeholder("No records match these filters."), []
+
+    head = html.Thead(html.Tr([
+        html.Th("", style={"width": "26px"}),
+        html.Th("FIGI", style={"width": "140px"}),
+        html.Th("Name"),
+        html.Th("Bloomberg", style={"width": "100px"}),
+        html.Th("Raw", style={"width": "90px"}),
+        html.Th("SEDOL", style={"width": "85px"}),
+        html.Th("Yahoo ID", style={"width": "95px"}),
+        html.Th("Group FIGI", style={"width": "130px"}),
+        html.Th("Max wt", style={"width": "72px"}),
+    ]))
+
+    rows = []
+    for i, r in enumerate(df.itertuples()):
+        figi = str(r.figi)
+        gfigi = _cell(r.group_figi)
+        gfigi = figi if gfigi == "-" else gfigi
+        is_child = gfigi != figi
+        reviewed = bool(r.reviewed)
+        yahoo_display = _cell(r.yahoo_id).replace("YF:", "")
+        heavy = r.max_weight is not None and str(r.max_weight) != "nan" and r.max_weight >= 1.0
+
+        rows.append(html.Tr(
+            id={"type": "etf-m-row", "index": i}, n_clicks=0,
+            children=[
+                html.Td("✓" if reviewed else "",
+                        style={"textAlign": "center", "color": theme.POSITIVE,
+                               "fontWeight": 700}),
+                html.Td(figi[:18], style={"fontSize": "10.5px",
+                                          "color": theme.NEUTRAL, **theme.NUM}),
+                html.Td(_cell(r.name), style={"fontWeight": 500, "maxWidth": "230px",
+                                              "overflow": "hidden",
+                                              "textOverflow": "ellipsis",
+                                              "whiteSpace": "nowrap"}),
+                html.Td(_cell(r.bloomberg_code), style={"fontSize": "11px",
+                                                        "color": theme.SLATE, **theme.NUM}),
+                html.Td(_cell(r.raw_ticker), style={"fontSize": "11px",
+                                                    "color": theme.SLATE, **theme.NUM}),
+                html.Td(_cell(r.sedol), style={"fontSize": "11px",
+                                               "color": theme.NEUTRAL, **theme.NUM}),
+                html.Td(yahoo_display or "-", style={"fontSize": "11px", **theme.NUM}),
+                html.Td(gfigi[:16], style={"fontSize": "10.5px", **theme.NUM,
+                                           "color": theme.NEEDLE if is_child
+                                                    else theme.NEUTRAL}),
+                html.Td(f"{r.max_weight:.2f}%" if heavy or (r.max_weight and str(r.max_weight) != "nan")
+                        else "-", className="num",
+                        style={"fontWeight": 600 if heavy else 400,
+                               "color": theme.TEXT if heavy else theme.NEUTRAL}),
+            ],
+            style={"cursor": "pointer"},
+        ))
+
+    table = html.Div(html.Table([head, html.Tbody(rows)], className="pz"),
+                     style={"overflowX": "auto", "maxHeight": "620px",
+                            "overflowY": "auto"})
+    return summary, table, df["figi"].tolist()
+
+
+def _pill(value, label, colour):
+    return html.Div([
+        html.Span(value, style={"fontSize": "19px", "fontWeight": 600,
+                                "color": colour, **theme.NUM}),
+        html.Span(label, style={"fontSize": "11px", "color": theme.SLATE,
+                                "marginLeft": "6px"}),
+    ])
+
+
+@callback(
+    Output("etf-m-selected", "data"),
+    Input({"type": "etf-m-row", "index": dash.ALL}, "n_clicks"),
+    State("etf-m-figis", "data"),
+    prevent_initial_call=True,
+)
+def _select_row(clicks, figis):
+    triggered = ctx.triggered_id
+    if not triggered or not figis or not any(clicks or []):
+        return no_update
+    idx = triggered["index"]
+    return figis[idx] if idx < len(figis) else no_update
+
+
+@callback(
+    Output("etf-m-edit", "children"),
+    Input("etf-m-selected", "data"), Input("etf-m-refresh", "data"),
+)
+def _edit_panel(figi, _refresh):
+    if not figi:
+        return html.Div()
+    r = repo.map_record(figi)
+    if not r:
+        return html.Div()
+
+    def field(label, id_, value, placeholder, width="130px"):
+        val = "" if value is None or str(value).lower() in ("nan", "none") else str(value)
+        return _control(label, _text_input(id_, placeholder), width) if False else html.Div([
+            html.Label(label, style={"display": "block", "fontSize": "10px",
+                                     "fontWeight": 600, "letterSpacing": "0.06em",
+                                     "textTransform": "uppercase",
+                                     "color": theme.SLATE, "marginBottom": "4px"}),
+            dcc.Input(id=id_, value=val, placeholder=placeholder, debounce=True,
+                      style={"width": width, "padding": "6px 9px", "fontSize": "12.5px",
+                             "border": f"1px solid {theme.LINE}", "borderRadius": "4px"}),
+        ], style={"marginRight": "9px", "marginBottom": "8px"})
+
+    current = str(r["figi"])
+    group = "" if (not r["group_figi"] or str(r["group_figi"]) in ("nan", current)) \
+            else str(r["group_figi"])
+    yahoo = _cell(r["yahoo_id"], False).replace("YF:", "")
+    max_w = r.get("max_weight")
+
+    meta = html.Div([
+        html.Span("FIGI ", style={"color": theme.NEUTRAL}),
+        html.Span(current, style={**theme.NUM, "marginRight": "18px"}),
+        html.Span("Type ", style={"color": theme.NEUTRAL}),
+        html.Span(_cell(r["security_type"]), style={"marginRight": "18px"}),
+        html.Span("Max weight ", style={"color": theme.NEUTRAL}),
+        html.Span(f"{max_w:.2f}%" if max_w and str(max_w) != "nan" else "-",
+                  style={**theme.NUM, "fontWeight": 600}),
+    ], style={"fontSize": "11.5px", "color": theme.SLATE, "marginBottom": "12px"})
+
+    return html.Div([
+        html.Div("Edit mapping", style=theme.CARD_TITLE),
+        meta,
+        html.Div([
+            field("FIGI", "etf-m-f-figi",
+                  "" if current.startswith("UNRESOLVED") else current,
+                  "BBG000BP5H35", "150px"),
+            field("Name", "etf-m-f-name", r["name"], "Company name", "185px"),
+            field("Bloomberg", "etf-m-f-bbg", r["bloomberg_code"], "BA. LN", "110px"),
+            field("Raw ticker", "etf-m-f-raw", r["raw_ticker"], "as in file", "105px"),
+            field("SEDOL", "etf-m-f-sedol", r["sedol"], "0263494", "95px"),
+            field("ISIN", "etf-m-f-isin", r["isin"], "GB0002634946", "140px"),
+            field("Yahoo ID", "etf-m-f-yahoo", yahoo, "BA.L", "110px"),
+            field("Group FIGI", "etf-m-f-group", group, "parent, or blank", "150px"),
+            field("Notes", "etf-m-f-notes", r["notes"], "optional", "130px"),
+            html.Div([
+                _button("Save and approve", "etf-m-save", primary=True),
+                html.Span(" "),
+                _button("No price feed", "etf-m-empty"),
+            ], style={"display": "flex", "gap": "8px", "marginBottom": "8px"}),
+        ], style={"display": "flex", "alignItems": "flex-end", "flexWrap": "wrap"}),
+    ], style={**theme.CARD, "borderLeft": f"3px solid {theme.NEEDLE}",
+              "borderRadius": "0 6px 6px 0"})
+
+
+@callback(
+    Output("etf-m-refresh", "data"), Output("etf-m-feedback", "children"),
+    Input("etf-m-auto", "n_clicks"), Input("etf-m-save", "n_clicks"),
+    Input("etf-m-empty", "n_clicks"),
+    State("etf-m-selected", "data"), State("etf-m-refresh", "data"),
+    State("etf-m-f-figi", "value"), State("etf-m-f-name", "value"),
+    State("etf-m-f-bbg", "value"), State("etf-m-f-raw", "value"),
+    State("etf-m-f-sedol", "value"), State("etf-m-f-isin", "value"),
+    State("etf-m-f-yahoo", "value"), State("etf-m-f-group", "value"),
+    State("etf-m-f-notes", "value"),
+    prevent_initial_call=True,
+)
+def _map_actions(auto_n, save_n, empty_n, selected, refresh,
+                 figi, name, bbg, raw, sedol, isin, yahoo, group, notes):
+    triggered = ctx.triggered_id
+    if not triggered:
+        return no_update, no_update
+
+    fields = {"name": name, "bloomberg_code": bbg, "raw_ticker": raw,
+              "sedol": sedol, "isin": isin, "notes": notes}
+    try:
+        if triggered == "etf-m-auto":
+            n = repo.map_auto_approve()
+            return refresh + 1, _feedback(f"Approved {n:,} records.")
+
+        if not selected:
+            return no_update, _feedback("Select a row first.", ok=False)
+
+        if triggered == "etf-m-empty":
+            repo.map_mark_empty(selected, fields, group)
+            return refresh + 1, _feedback(
+                f"{selected[:20]} marked reviewed with no price feed.")
+
+        if triggered == "etf-m-save":
+            result = repo.map_save(selected, fields, yahoo, group, figi)
+            label = f"YF:{yahoo}" if yahoo else "no Yahoo ID"
+            return refresh + 1, _feedback(f"{label} saved for {result[:20]}.")
+    except Exception as exc:                                   # noqa: BLE001
+        return no_update, _feedback(str(exc)[:200], ok=False)
+
+    return no_update, no_update
+
+
+# --- Sources tab ---------------------------------------------------------
+
+def _sources_view():
+    return html.Div([
+        html.Div(id="etf-s-feedback", style={"marginBottom": "10px"}),
+        card("Holdings file sources", html.Div(id="etf-s-table")),
+        dcc.Store(id="etf-s-refresh", data=0),
+    ])
+
+
+@callback(Output("etf-s-table", "children"), Input("etf-s-refresh", "data"))
+def _sources_table(_refresh):
+    df = repo.sources()
+    if df.empty:
+        return placeholder("No ETFs with holdings data yet.")
+
+    providers = universe.etf_providers()
+    names = universe.etf_names()
+
+    head = html.Thead(html.Tr([
+        html.Th("ETF", style={"width": "230px"}),
+        html.Th("Provider", style={"width": "95px"}),
+        html.Th("Last import", style={"width": "100px"}),
+        html.Th("Snaps", style={"width": "60px"}),
+        html.Th("Download URL"),
+        html.Th("", style={"width": "130px"}),
+    ]))
+
+    rows = []
+    for r in df.itertuples():
+        etf_id = r.etf_fund_id
+        label = names.get(etf_id, reference.short_name(etf_id))
+        has_url = bool(r.url)
+        rows.append(html.Tr([
+            html.Td(label, style={"fontWeight": 500, "fontSize": "12.5px"}),
+            html.Td(providers.get(etf_id, "-"),
+                    style={"color": theme.SLATE, "fontSize": "11.5px"}),
+            html.Td(r.last_import, className="num",
+                    style={"color": theme.SLATE, "fontSize": "11.5px"}),
+            html.Td(r.snapshots, className="num", style={"color": theme.NEUTRAL}),
+            html.Td(dcc.Input(
+                id={"type": "etf-s-url", "index": etf_id}, value=r.url,
+                placeholder="paste the provider download link",
+                debounce=True,
+                style={"width": "100%", "padding": "5px 8px", "fontSize": "11.5px",
+                       "border": f"1px solid {theme.LINE}", "borderRadius": "4px",
+                       **theme.NUM})),
+            html.Td(html.Div([
+                html.Button("Save", id={"type": "etf-s-save", "index": etf_id},
+                            n_clicks=0,
+                            style={"padding": "5px 11px", "fontSize": "11.5px",
+                                   "fontWeight": 600, "cursor": "pointer",
+                                   "border": f"1px solid {theme.LINE}",
+                                   "borderRadius": "4px",
+                                   "background": theme.SURFACE}),
+                html.A("Open", href=r.url if has_url else "#", target="_blank",
+                       style={"marginLeft": "8px", "fontSize": "11.5px",
+                              "color": "#2E75B6" if has_url else theme.NEUTRAL,
+                              "textDecoration": "none",
+                              "pointerEvents": "auto" if has_url else "none"}),
+            ], style={"display": "flex", "alignItems": "center"})),
+        ]))
+
+    return html.Div(html.Table([head, html.Tbody(rows)], className="pz"),
+                    style={"overflowX": "auto"})
+
+
+@callback(
+    Output("etf-s-refresh", "data"), Output("etf-s-feedback", "children"),
+    Input({"type": "etf-s-save", "index": dash.ALL}, "n_clicks"),
+    State({"type": "etf-s-url", "index": dash.ALL}, "value"),
+    State({"type": "etf-s-url", "index": dash.ALL}, "id"),
+    State("etf-s-refresh", "data"),
+    prevent_initial_call=True,
+)
+def _save_source(clicks, urls, ids, refresh):
+    triggered = ctx.triggered_id
+    if not triggered or not any(clicks or []):
+        return no_update, no_update
+
+    etf_id = triggered["index"]
+    url = next((u for u, i in zip(urls, ids) if i["index"] == etf_id), None)
+    try:
+        repo.set_source(etf_id, (url or "").strip())
+        label = reference.short_name(etf_id)
+        return refresh + 1, _feedback(
+            f"URL saved for {label}." if url else f"URL cleared for {label}.")
+    except Exception as exc:                                   # noqa: BLE001
+        return no_update, _feedback(str(exc)[:200], ok=False)
+
+
 @callback(Output("etf-body", "children"), Input("etf-tabs", "value"))
 def _render(tab):
     views = {
@@ -537,6 +907,8 @@ def _render(tab):
         "Changes": _changes_view,
         "Compare": _compare_view,
         "Fund compare": _fund_compare_view,
+        "Ticker map": _map_view,
+        "Sources": _sources_view,
     }
     intro = TAB_INTRO.get(tab, "")
     body = views[tab]() if tab in views else placeholder(f"{tab} - not migrated yet")

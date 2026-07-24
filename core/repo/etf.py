@@ -212,8 +212,19 @@ def ensure_sources_table() -> None:
 
 
 def sources() -> pd.DataFrame:
+    """
+    One row per ETF that has holdings data, with its download URL if set.
+    ETFs with no URL recorded still appear, so gaps are visible.
+    """
     ensure_sources_table()
-    return db.query("SELECT etf_fund_id, url FROM etf_sources ORDER BY etf_fund_id")
+    return db.query("""
+        SELECT h.etf_fund_id, COALESCE(s.url, '') AS url,
+               MAX(h.scraped_date) AS last_import,
+               COUNT(DISTINCT h.scraped_date) AS snapshots
+        FROM etf_holdings h
+        LEFT JOIN etf_sources s ON s.etf_fund_id = h.etf_fund_id
+        GROUP BY h.etf_fund_id ORDER BY h.etf_fund_id
+    """)
 
 
 def set_source(etf_id: str, url: str) -> int:
@@ -233,29 +244,6 @@ def unresolved_count() -> int:
     return int(df["n"].iloc[0])
 
 
-def map_rows(status: str = "all", search: str = "",
-             search_yahoo: str = "", search_group: str = "") -> pd.DataFrame:
-    sql = ("SELECT figi, group_figi, name, base_ticker, raw_ticker, "
-           "       bloomberg_code, sedol, isin, yahoo_id, exch_code, reviewed "
-           "FROM stock_identifier_map WHERE 1=1")
-    params: list = []
-    if status == "unresolved":
-        sql += " AND (figi LIKE 'UNRESOLVED%' OR yahoo_id IS NULL OR yahoo_id = '')"
-    elif status == "reviewed":
-        sql += " AND reviewed = 1"
-    elif status == "unreviewed":
-        sql += " AND (reviewed = 0 OR reviewed IS NULL)"
-    if search:
-        sql += " AND (UPPER(name) LIKE ? OR UPPER(raw_ticker) LIKE ? OR UPPER(base_ticker) LIKE ?)"
-        params += [f"%{search.upper()}%"] * 3
-    if search_yahoo:
-        sql += " AND UPPER(yahoo_id) LIKE ?"
-        params.append(f"%{search_yahoo.upper()}%")
-    if search_group:
-        sql += " AND UPPER(group_figi) LIKE ?"
-        params.append(f"%{search_group.upper()}%")
-    sql += " ORDER BY name LIMIT 500"
-    return db.query(sql, tuple(params))
 
 
 # --- Comparison ----------------------------------------------------------
@@ -408,3 +396,179 @@ def compare(etf_a: str, etf_b: str) -> dict:
         "top10_weight_a": float(a.head(10)["weight_pct"].sum()),
         "top10_weight_b": float(b.head(10)["weight_pct"].sum()),
     }
+
+def map_summary() -> dict:
+    df = db.query(
+        "SELECT COUNT(*) AS total, "
+        "       SUM(CASE WHEN reviewed = 1 THEN 1 ELSE 0 END) AS reviewed, "
+        "       SUM(CASE WHEN reviewed = 0 OR reviewed IS NULL THEN 1 ELSE 0 END) AS unreviewed "
+        "FROM stock_identifier_map")
+    r = df.iloc[0]
+    return {"total": int(r["total"] or 0),
+            "reviewed": int(r["reviewed"] or 0),
+            "unreviewed": int(r["unreviewed"] or 0)}
+
+
+MAP_COLUMNS = ("figi, name, base_ticker, exch_code, bloomberg_code, raw_ticker, "
+               "sedol, isin, yahoo_id, security_type, group_figi, reviewed, notes")
+
+# Heaviest weight each identifier reaches in any fund's latest snapshot, so the
+# review queue can be ordered by what actually matters. Built as a CTE over the
+# latest date per ETF rather than a correlated subquery per row.
+_LATEST_WEIGHTS = """
+WITH latest AS (
+    SELECT etf_fund_id, MAX(scraped_date) AS d
+    FROM etf_holdings GROUP BY etf_fund_id
+),
+w AS (
+    SELECT UPPER(TRIM(h.ticker)) AS t, MAX(h.weight_pct) AS max_weight
+    FROM etf_holdings h
+    JOIN latest l ON l.etf_fund_id = h.etf_fund_id AND l.d = h.scraped_date
+    WHERE h.ticker IS NOT NULL AND TRIM(h.ticker) != ''
+    GROUP BY UPPER(TRIM(h.ticker))
+)
+"""
+
+
+def map_records(status: str = "unreviewed", search: str = "",
+                search_yahoo: str = "", search_group: str = "",
+                limit: int = 500) -> pd.DataFrame:
+    """Rows for the review table, heaviest holdings first."""
+    conditions, params = [], []
+
+    if status == "unreviewed":
+        conditions.append("(s.reviewed = 0 OR s.reviewed IS NULL)")
+    elif status == "reviewed":
+        conditions.append("s.reviewed = 1")
+    elif status == "empty":
+        conditions.append("(s.yahoo_id IS NULL OR s.yahoo_id = '')")
+    elif status == "has_yahoo":
+        conditions.append("(s.yahoo_id IS NOT NULL AND s.yahoo_id != '')")
+
+    if search:
+        conditions.append("(LOWER(s.name) LIKE ? OR LOWER(s.bloomberg_code) LIKE ? "
+                          "OR LOWER(s.base_ticker) LIKE ? OR LOWER(s.raw_ticker) LIKE ?)")
+        params += [f"%{search.lower()}%"] * 4
+    if search_yahoo:
+        conditions.append("LOWER(COALESCE(s.yahoo_id, '')) LIKE ?")
+        params.append(f"%{search_yahoo.lower()}%")
+    if search_group:
+        conditions.append("LOWER(COALESCE(s.group_figi, '')) LIKE ?")
+        params.append(f"%{search_group.lower()}%")
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    cols = ", ".join(f"s.{c.strip()}" for c in MAP_COLUMNS.split(","))
+    params.append(limit)
+
+    return db.query(f"""
+        {_LATEST_WEIGHTS}
+        SELECT {cols}, ROUND(w.max_weight, 2) AS max_weight
+        FROM stock_identifier_map s
+        LEFT JOIN w ON w.t IN (s.bloomberg_code, s.base_ticker, s.raw_ticker, s.sedol)
+        {where}
+        ORDER BY s.reviewed ASC, w.max_weight DESC NULLS LAST, s.name
+        LIMIT ?
+    """, tuple(params))
+
+
+def map_record(figi: str) -> dict | None:
+    cols = ", ".join(f"s.{c.strip()}" for c in MAP_COLUMNS.split(","))
+    df = db.query(f"""
+        {_LATEST_WEIGHTS}
+        SELECT {cols}, ROUND(w.max_weight, 2) AS max_weight
+        FROM stock_identifier_map s
+        LEFT JOIN w ON w.t IN (s.bloomberg_code, s.base_ticker, s.raw_ticker, s.sedol)
+        WHERE s.figi = ? LIMIT 1
+    """, (figi,))
+    return df.iloc[0].to_dict() if not df.empty else None
+
+
+def _clean(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text if text and text.lower() not in ("nan", "none") else None
+
+
+_EDITABLE = ("name", "bloomberg_code", "raw_ticker", "sedol", "isin", "notes")
+
+
+def map_save(figi: str, fields: dict, yahoo_id: str | None,
+             group_figi: str | None, new_figi: str | None = None) -> str:
+    """
+    Save one mapping and mark it reviewed.
+
+    If new_figi differs, the row is rewritten under the new key - FIGI is the
+    primary key, so it can't be updated in place. Returns the resulting FIGI.
+    """
+    values = {k: _clean(fields.get(k)) for k in _EDITABLE}
+    yahoo = _clean(yahoo_id)
+    if yahoo:
+        yahoo = f"YF:{yahoo.replace('YF:', '')}"
+
+    target = _clean(new_figi) or figi
+    group = _clean(group_figi) or target
+
+    with db.get_conn() as conn:
+        if target != figi:
+            old = conn.execute("SELECT * FROM stock_identifier_map WHERE figi = ?",
+                               (figi,)).fetchone()
+            old = dict(old) if old else {}
+            conn.execute("DELETE FROM stock_identifier_map WHERE figi = ?", (figi,))
+            conn.execute(f"""
+                INSERT OR REPLACE INTO stock_identifier_map ({MAP_COLUMNS})
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            """, (target,
+                  values["name"] or old.get("name"),
+                  old.get("base_ticker"), old.get("exch_code"),
+                  values["bloomberg_code"] or old.get("bloomberg_code"),
+                  values["raw_ticker"] or old.get("raw_ticker"),
+                  values["sedol"] or old.get("sedol"),
+                  values["isin"] or old.get("isin"),
+                  yahoo or old.get("yahoo_id"),
+                  old.get("security_type"), group, values["notes"]))
+        else:
+            conn.execute("""
+                UPDATE stock_identifier_map
+                SET yahoo_id = ?, reviewed = 1, notes = ?, group_figi = ?,
+                    name           = COALESCE(?, name),
+                    bloomberg_code = COALESCE(?, bloomberg_code),
+                    raw_ticker     = COALESCE(?, raw_ticker),
+                    sedol          = COALESCE(?, sedol),
+                    isin           = COALESCE(?, isin)
+                WHERE figi = ?
+            """, (yahoo, values["notes"], group, values["name"],
+                  values["bloomberg_code"], values["raw_ticker"],
+                  values["sedol"], values["isin"], figi))
+    clear_cache()
+    return target
+
+
+def map_mark_empty(figi: str, fields: dict, group_figi: str | None) -> None:
+    """Mark reviewed with no Yahoo ID - a deliberate 'this has no price feed'."""
+    values = {k: _clean(fields.get(k)) for k in _EDITABLE}
+    db.execute("""
+        UPDATE stock_identifier_map
+        SET yahoo_id = NULL, reviewed = 1, notes = ?, group_figi = ?,
+            name           = COALESCE(?, name),
+            bloomberg_code = COALESCE(?, bloomberg_code),
+            raw_ticker     = COALESCE(?, raw_ticker),
+            sedol          = COALESCE(?, sedol),
+            isin           = COALESCE(?, isin)
+        WHERE figi = ?
+    """, (values["notes"], _clean(group_figi) or figi, values["name"],
+          values["bloomberg_code"], values["raw_ticker"], values["sedol"],
+          values["isin"], figi))
+    clear_cache()
+
+
+def map_auto_approve() -> int:
+    """Mark reviewed every unreviewed row that already has a FIGI and Yahoo ID."""
+    n = db.execute("""
+        UPDATE stock_identifier_map SET reviewed = 1
+        WHERE (reviewed = 0 OR reviewed IS NULL)
+          AND figi IS NOT NULL AND figi NOT LIKE 'UNRESOLVED%'
+          AND yahoo_id IS NOT NULL AND yahoo_id != ''
+    """)
+    clear_cache()
+    return n
