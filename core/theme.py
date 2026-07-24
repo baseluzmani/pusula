@@ -87,3 +87,14 @@ def colour_for(value: float) -> str:
     if value is None:
         return NEUTRAL
     return POSITIVE if value > 0 else NEGATIVE if value < 0 else NEUTRAL
+
+def heat_rgb(val, cap=3.0):
+    """Diverging cell background: red (neg) -> white (0) -> green (pos)."""
+    if val is None or (isinstance(val, float) and val != val):
+        return "rgb(244,246,249)"
+    v = max(-1.0, min(1.0, val / cap))
+    if v >= 0:
+        r = int(255 - v * 170); g = 255; b = int(255 - v * 150)
+    else:
+        r = 255; g = int(255 + v * 150); b = int(255 + v * 170)
+    return f"rgb({r},{g},{b})"

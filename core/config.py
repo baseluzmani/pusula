@@ -54,3 +54,9 @@ def check() -> list[str]:
     if not OPENFIGI_API_KEY:
         problems.append("OPENFIGI_API_KEY not set in .env")
     return problems
+
+# --- Markets --------------------------------------------------------
+# Earliest date shown on price charts by default (the "From" floor).
+MARKETS_CHART_START = "2020-01-01"
+# Default baseline for the "Since" return column and rebased Compare chart.
+MARKETS_SINCE_DEFAULT = "2026-03-01"

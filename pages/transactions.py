@@ -19,12 +19,11 @@ from dash import html, dcc, callback, Input, Output, State, ctx, ALL, no_update
 import pandas as pd
 import plotly.graph_objects as go
 
-from core import theme
+from core import theme, config
 from core.repo import market as repo
 from ui import universe
 
 RETURN_COLS = ["1D", "1W", "1M", "3M", "YTD", "Since"]
-DEFAULT_SINCE = "2026-03-01"
 
 
 def render():
@@ -43,7 +42,7 @@ def render():
             html.Div([
                 html.Label("Since", style={"fontSize": "11px",
                            "color": theme.SLATE, "marginRight": "8px"}),
-                dcc.DatePickerSingle(id="tx-since", date=DEFAULT_SINCE,
+                dcc.DatePickerSingle(id="tx-since", date=config.MARKETS_SINCE_DEFAULT,
                                      display_format="DD MMM YYYY"),
             ], style={"display": "flex", "alignItems": "center"}),
         ], style={"display": "flex", "justifyContent": "space-between",
@@ -102,7 +101,7 @@ def render():
     State("tx-sort", "data"),
 )
 def _table(store, since, _sorts, selected, sort):
-    since = since or DEFAULT_SINCE
+    since = since or config.MARKETS_SINCE_DEFAULT
     trig = ctx.triggered_id
     if isinstance(trig, dict) and trig.get("type") == "tx-sort":
         col = trig["col"]
@@ -237,7 +236,11 @@ def _chart(fid, start):
 
     p = px[px["fund_id"] == fid].sort_values("date")
     if start is None:
-        start = p["date"].min().strftime("%Y-%m-%d")
+        # Open at the configured floor, or the fund's first price if it
+        # starts later than the floor.
+        floor = pd.Timestamp(config.MARKETS_CHART_START)
+        first = p["date"].min()
+        start = max(floor, first).strftime("%Y-%m-%d")
     start_dt = pd.Timestamp(start)
     p = p[p["date"] >= start_dt]
 
