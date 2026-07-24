@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+data/*.db
+data/*.db-wal
+data/*.db-shm
+inbox/
+*.csv
+*.xlsx
+*.xls
+.env
+.DS_Store
