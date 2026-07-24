@@ -7,8 +7,11 @@ To add an importer:
   2. add a dict below
 Nothing else needs changing.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Callable
+
+from importers import etf_holdings as _etf_holdings
+from importers import stock_map as _stock_map
 
 
 @dataclass
@@ -41,6 +44,7 @@ REGISTRY: list[Importer] = [
         target_tables=["etf_holdings"],
         description=("Parses iShares, Xtrackers/DWS, GlobalX and others; "
                      "resolves tickers or ISINs to the identifier map."),
+        run=_etf_holdings.run,
     ),
     Importer(
         id="stock_map",
@@ -49,6 +53,7 @@ REGISTRY: list[Importer] = [
         source="OpenFIGI API",
         target_tables=["stock_identifier_map"],
         description="Enriches unresolved tickers and ISINs with FIGI keys.",
+        run=_stock_map.run,
     ),
     Importer(
         id="pension_funds",

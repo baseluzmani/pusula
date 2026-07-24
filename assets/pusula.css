@@ -1,13 +1,13 @@
-/* Global styles. Dash loads anything in assets/ automatically. */
-
 :root {
-  --ink: #111A2B;
-  --ink-soft: #1E2A42;
-  --slate: #5A6884;
-  --line: #DDE3EC;
+  --ink: #0F1826;
+  --ink-soft: #1C2839;
+  --text: #1F2937;
+  --slate: #6B7891;
+  --line: #E8ECF2;
+  --line-soft: #F0F3F7;
   --surface: #FFFFFF;
-  --canvas: #F5F7FA;
-  --needle: #C9922E;
+  --canvas: #FAFBFC;
+  --needle: #B8860F;
 }
 
 * { box-sizing: border-box; }
@@ -15,18 +15,18 @@
 body {
   margin: 0;
   background: var(--canvas);
-  color: var(--ink);
+  color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
                'Helvetica Neue', Arial, sans-serif;
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
 }
 
-/* ---- Top bar ---------------------------------------------------------- */
 .topbar {
   background: var(--ink);
   display: flex;
   align-items: stretch;
+  height: 46px;
   padding: 0 20px;
   position: sticky;
   top: 0;
@@ -37,16 +37,14 @@ body {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding-right: 26px;
+  padding-right: 28px;
   color: #fff;
   font-weight: 600;
-  font-size: 15px;
-  letter-spacing: 0.14em;
+  font-size: 13px;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
 }
 
-/* Signature element: the compass needle rotates once on page load, then rests
-   pointing north. Respects prefers-reduced-motion. */
 .needle { transform-origin: 50% 50%; animation: settle 1.1s cubic-bezier(.2,.8,.2,1) 1; }
 @keyframes settle { from { transform: rotate(-140deg); } to { transform: rotate(0deg); } }
 @media (prefers-reduced-motion: reduce) { .needle { animation: none; } }
@@ -54,8 +52,8 @@ body {
 .navlink {
   display: flex;
   align-items: center;
-  padding: 0 16px;
-  color: #96A2BA;
+  padding: 0 15px;
+  color: #93A0B8;
   text-decoration: none;
   font-size: 13px;
   font-weight: 500;
@@ -65,8 +63,7 @@ body {
 .navlink:hover { color: #fff; background: var(--ink-soft); }
 .navlink.active { color: #fff; border-bottom-color: var(--needle); }
 
-.navlink:focus-visible,
-a:focus-visible, button:focus-visible {
+.navlink:focus-visible, a:focus-visible, button:focus-visible {
   outline: 2px solid var(--needle);
   outline-offset: -2px;
 }
@@ -77,35 +74,56 @@ a:focus-visible, button:focus-visible {
   font-size: 10px;
   letter-spacing: .1em;
   text-transform: uppercase;
-  color: var(--needle);
-  border: 1px solid rgba(201,146,46,.45);
-  border-radius: 3px;
-  padding: 3px 8px;
+  color: #6E7C94;
 }
 
-/* ---- Sub-tabs within a section ---------------------------------------- */
 .subtabs {
   background: var(--surface);
   border-bottom: 1px solid var(--line);
-  padding: 0 28px;
+  padding: 0 30px;
 }
 
-/* ---- Tables ----------------------------------------------------------- */
+/* Dash dcc.Tabs, flattened to plain underlined text */
+.subtabs .tab-container { border: none !important; }
+.subtabs .tab {
+  border: none !important;
+  background: transparent !important;
+  color: var(--slate) !important;
+  font-size: 13px !important;
+  font-weight: 500 !important;
+  padding: 11px 2px !important;
+  margin-right: 22px !important;
+  border-bottom: 2px solid transparent !important;
+}
+.subtabs .tab:hover { color: var(--text) !important; }
+.subtabs .tab--selected {
+  color: var(--text) !important;
+  border-bottom: 2px solid var(--needle) !important;
+  box-shadow: none !important;
+}
+
 table.pz { border-collapse: collapse; width: 100%; font-size: 13px; }
 table.pz th {
   text-align: left; font-size: 10.5px; letter-spacing: .07em;
   text-transform: uppercase; color: var(--slate); font-weight: 600;
-  border-bottom: 1px solid var(--line); padding: 8px 10px;
+  border-bottom: 1px solid var(--line); padding: 9px 10px;
 }
-table.pz td { border-bottom: 1px solid #EEF1F6; padding: 7px 10px; }
+table.pz td { border-bottom: 1px solid var(--line-soft); padding: 8px 10px; }
 table.pz td.num {
   text-align: right;
   font-family: 'SF Mono', 'JetBrains Mono', Consolas, monospace;
   font-variant-numeric: tabular-nums;
 }
-table.pz tbody tr:hover { background: #FAFBFD; }
+table.pz tbody tr:hover { background: #FBFCFD; }
+
+.Select-control, input, select {
+  border-color: var(--line) !important;
+  border-radius: 4px !important;
+  font-size: 13px !important;
+}
 
 @media (max-width: 720px) {
-  .topbar { flex-wrap: wrap; padding: 0 12px; }
+  .topbar { flex-wrap: wrap; height: auto; padding: 0 12px; }
   .navlink { padding: 10px 12px; }
+  .subtabs { padding: 0 14px; }
 }

@@ -13,28 +13,35 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 # --- Database ------------------------------------------------------------
-# Shared with the legacy dashboards on 8050-8053.
-# ADDITIVE SCHEMA CHANGES ONLY while both are running.
-DB_MODE = os.environ.get("PUSULA_DB", "live")      # "live" or "sandbox"
-
-_DB = {
-    "live":    Path.home() / "FTScrapper" / "data" / "funds.db",
-    "sandbox": ROOT / "data" / "funds_sandbox.db",
-}
-DB_PATH = _DB[DB_MODE]
+# Development points at the local copy. At cutover, change this one line.
+DB_PATH = ROOT / "data" / "funds.db"
+# DB_PATH = Path.home() / "FTScrapper" / "data" / "funds.db"   # live
 
 # --- Folders -------------------------------------------------------------
 INBOX_DIR = ROOT / "inbox"          # drop provider files here for importers
 SCRIPTS_DIR = ROOT / "scripts"
 
+# Legacy FTScrapper tree. Importer scripts still live there and are invoked
+# in place until they are migrated. Remove once importers/ owns the logic.
+LEGACY_DIR = Path.home() / "FTScrapper"
+
 # --- App -----------------------------------------------------------------
 APP_NAME = "Pusula"
-PORT = int(os.environ.get("PUSULA_PORT", 8060))
-DEBUG = os.environ.get("PUSULA_DEBUG", "0") == "1"
-
+PORT = 8060                          # old dashboards keep 8050-8053
+DEBUG = True
 
 # --- Secrets (never committed; live in .env) -----------------------------
 OPENFIGI_API_KEY = os.environ.get("OPENFIGI_API_KEY", "")
+
+# --- OpenFIGI ------------------------------------------------------------
+FIGI_URL = "https://api.openfigi.com/v3/mapping"
+FIGI_BATCH_SIZE = 100          # OpenFIGI maximum per request
+FIGI_RATE_SLEEP = 1.0          # seconds between batches
+
+# --- ETF holdings --------------------------------------------------------
+AUTO_APPROVE_THRESHOLD = 0.90  # name-match confidence for auto-approval
+TREND_TOP_N = 20               # holdings shown in weight-trend charts
+MAP_ROW_LIMIT = 500            # rows returned to the Ticker map tab
 
 # --- Sanity check --------------------------------------------------------
 def check() -> list[str]:

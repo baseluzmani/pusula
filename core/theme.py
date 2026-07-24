@@ -4,18 +4,19 @@ from here, so changing the look means editing one file.
 """
 
 # --- Palette -------------------------------------------------------------
-# Dark "chrome" (nav bar) with a light working surface, the way a trading or
-# reporting terminal separates instrument from content.
-INK        = "#111A2B"   # nav bar, headings
-INK_SOFT   = "#1E2A42"   # nav hover, borders on dark
-SLATE      = "#5A6884"   # secondary text
-LINE       = "#DDE3EC"   # hairline borders on light
+# Dark chrome (top bar only) over a light, quiet working surface.
+INK        = "#0F1826"   # top bar
+INK_SOFT   = "#1C2839"   # top bar hover
+TEXT       = "#1F2937"   # body text (softer than the bar)
+SLATE      = "#6B7891"   # secondary text
+LINE       = "#E8ECF2"   # hairline borders
+LINE_SOFT  = "#F0F3F7"   # table row separators
 SURFACE    = "#FFFFFF"   # cards
-CANVAS     = "#F5F7FA"   # page background
-NEEDLE     = "#C9922E"   # accent: the compass needle. Use sparingly.
-POSITIVE   = "#1B7F5A"
-NEGATIVE   = "#B03A34"
-NEUTRAL    = "#8A93A6"
+CANVAS     = "#FAFBFC"   # page background
+NEEDLE     = "#B8860F"   # accent: the compass needle. Use sparingly.
+POSITIVE   = "#127A54"
+NEGATIVE   = "#A63A34"
+NEUTRAL    = "#98A1B3"
 
 # --- Type ----------------------------------------------------------------
 FONT_UI = ("-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
@@ -28,9 +29,9 @@ FONT_NUM = "'SF Mono', 'JetBrains Mono', 'Cascadia Mono', Consolas, monospace"
 CARD = {
     "backgroundColor": SURFACE,
     "border": f"1px solid {LINE}",
-    "borderRadius": "4px",
-    "padding": "18px 20px",
-    "marginBottom": "16px",
+    "borderRadius": "6px",
+    "padding": "20px 22px",
+    "marginBottom": "18px",
 }
 
 CARD_TITLE = {
@@ -43,15 +44,15 @@ CARD_TITLE = {
 }
 
 PAGE = {
-    "padding": "24px 28px",
+    "padding": "26px 30px",
     "maxWidth": "1600px",
     "margin": "0 auto",
 }
 
 H1 = {
-    "fontSize": "22px",
+    "fontSize": "20px",
     "fontWeight": 600,
-    "color": INK,
+    "color": TEXT,
     "margin": "0 0 4px 0",
     "letterSpacing": "-0.01em",
 }
