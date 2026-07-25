@@ -4,14 +4,14 @@ import dash
 from dash import html, dcc, callback, Input, Output
 
 from ui import universe
-from pages import transactions, compare
+from pages import transactions, compare, heatmap
 
 dash.register_page(__name__, path="/markets", name="Markets", order=2)
 
 TABS = {
     "Transactions": transactions.render,
     "Compare": compare.render,
-    # "Heatmap": heatmap.render,
+    "Heatmap": heatmap.render,
 }
 
 

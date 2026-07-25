@@ -262,12 +262,12 @@ def _chart(selected, since, store):
         line = g[g["date"] >= start].copy()
         if len(line) < 2:
             continue
-        line["ret"] = (line["close"] / base - 1) * 100
+        line["ret"] = ((line["close"] / base - 1) * 100).round(1)
         name = names.get(fid, fid)
         fig.add_trace(go.Scatter(
             x=line["date"], y=line["ret"], mode="lines", name=_short(name, 22),
             line=dict(width=2.2, color=LINE_COLOURS[i % len(LINE_COLOURS)]),
-            hovertemplate="%{x|%d %b %Y}: %{y:+.1f}%%<extra>" + name + "</extra>"))
+            hovertemplate="%{x|%d %b %Y}: %{y:+.1f}%<extra>" + name + "</extra>"))
 
     fig.update_layout(height=430, hovermode="x unified",
                       margin=dict(l=44, r=20, t=8, b=70),
