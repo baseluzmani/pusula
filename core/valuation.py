@@ -9,7 +9,7 @@ it once.
 Four kinds of holding are priced differently:
 
   COMPOSITE:  no market price of its own; valued from its components' latest
-              prices, weighted per the config definition
+              prices, weighted per the stored definition
   CASH:       face value, with CASH:TRY quoted as a point series
   ASSET:      face value (a house, for instance)
   everything  latest close converted to GBP by price_unit and currency
@@ -21,61 +21,39 @@ serves every tab and can be tested directly.
 
 from __future__ import annotations
 
-import importlib.util
-from functools import lru_cache
-from pathlib import Path
-
 import pandas as pd
 
 from core import finance as fin
+from core.repo import composites as comp_repo
+from core.repo import settings as settings_repo
 
 
-# --- Legacy configuration -------------------------------------------------
-# Composite definitions, account mappings and chart settings still live in
-# FTScrapper's config.py. Pusula is not on that path, so a plain
-# `import config` raises ModuleNotFoundError - it has to be loaded by file
-# location, via the LEGACY_DIR that core.config already points at.
-
-@lru_cache(maxsize=1)
-def _legacy_config():
-    from core import config as pusula_config
-    legacy_dir = getattr(pusula_config, "LEGACY_DIR",
-                         Path.home() / "FTScrapper")
-    path = Path(legacy_dir) / "config.py"
-    if not path.exists():
-        return None
-    try:
-        spec = importlib.util.spec_from_file_location("ftscrapper_config",
-                                                      path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module
-    except Exception:                                          # noqa: BLE001
-        return None
-
+# --- Configuration --------------------------------------------------------
+# Composite definitions, account mappings and chart settings used to be read
+# out of FTScrapper's config.py by file location, because Pusula is not on
+# that import path. They are now rows in the database, editable from
+# Data -> Composites and Data -> Config. The function signatures are
+# unchanged, so every caller carries on working.
 
 def composite_definitions() -> list:
-    """config.COMPOSITE_FUNDS - the component weights that let pension and
-    other blended funds be marked daily from their underlying prices."""
-    module = _legacy_config()
-    return getattr(module, "COMPOSITE_FUNDS", []) if module else []
+    """Component weights that let pension and other blended funds be marked
+    daily from their underlying prices."""
+    return comp_repo.definitions()
 
 
 def holding_accounts() -> dict:
-    module = _legacy_config()
-    return getattr(module, "HOLDING_ACCOUNTS", {}) if module else {}
+    """{fund_id: account} for holdings the transaction ledger does not cover."""
+    return comp_repo.holding_accounts()
 
 
 def chart_category_threshold(default: float = 0.02) -> float:
-    module = _legacy_config()
-    return (getattr(module, "CHART_CATEGORY_THRESHOLD", default)
-            if module else default)
+    return settings_repo.get("CHART_CATEGORY_THRESHOLD", default)
 
 
 def reload_config():
-    """Drop the cached legacy config - call after editing FTScrapper's
-    config.py so Pusula picks up new composites without a restart."""
-    _legacy_config.cache_clear()
+    """Kept so existing callers do not break. Nothing to clear now that the
+    definitions come from the database - every read is already current."""
+    return None
 
 
 def holding_price_gbp(fund_id, instruments, price_map, gbpusd, rates,
@@ -84,7 +62,7 @@ def holding_price_gbp(fund_id, instruments, price_map, gbpusd, rates,
     Latest price of one holding in GBP, or None if it cannot be priced.
 
     price_map: {fund_id: latest native close}, from finance.latest_price_map.
-    composites: list of composite definitions (config.COMPOSITE_FUNDS).
+    composites: list of composite definitions.
     """
     inst = instruments.get(fund_id, {})
     punit = inst.get("price_unit", "pound")

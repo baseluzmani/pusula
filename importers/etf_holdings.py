@@ -14,8 +14,8 @@ from core.repo import etf as repo
 def run() -> tuple[int, str]:
     before = _row_count()
     result = subprocess.run(
-        [sys.executable, str(config.LEGACY_DIR / "scripts" / "import_etf_holdings.py")],
-        cwd=str(config.LEGACY_DIR), capture_output=True, text=True, timeout=900)
+        [sys.executable, str(config.SCRIPTS_DIR / "import_etf_holdings.py")],
+        cwd=str(config.ROOT), capture_output=True, text=True, timeout=900)
     after = _row_count()
     repo.clear_cache()
 

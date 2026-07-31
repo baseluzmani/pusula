@@ -9,4 +9,5 @@ inbox/
 *.xlsx
 *.xls
 .env
-.DS_Store
+.DS_Storelogs/
+logs/

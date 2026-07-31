@@ -10,8 +10,8 @@ def run() -> tuple[int, str]:
     from core import db
     before = db.row_count("stock_identifier_map")
     result = subprocess.run(
-        [sys.executable, str(config.LEGACY_DIR / "scripts" / "build_stock_map.py")],
-        cwd=str(config.LEGACY_DIR), capture_output=True, text=True, timeout=900)
+        [sys.executable, str(config.SCRIPTS_DIR / "build_stock_map.py")],
+        cwd=str(config.ROOT), capture_output=True, text=True, timeout=900)
     after = db.row_count("stock_identifier_map")
     repo.clear_cache()
 

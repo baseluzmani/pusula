@@ -4,11 +4,12 @@ from dash import html, dcc, callback, Input, Output, State, ctx, no_update
 from core import theme, config, db
 from importers import registry, jobs
 from ui.layout import page_header, subtabs, card, data_table
-from pages import data_accounts, data_instruments
+from pages import data_accounts, data_instruments, data_composites, data_config, data_backfill
 
 dash.register_page(__name__, path="/data", name="Data", order=5)
 
-TABS = ["Importers", "Run history", "Database", "Accounts", "Instruments"]
+TABS = ["Importers", "Run history", "Database", "Accounts", "Instruments",
+        "Composites", "Config", "Backfill"]
 
 layout = html.Div([
     subtabs("dt-tabs", TABS),
@@ -126,6 +127,12 @@ def render(tab):
         return data_accounts.render()
     if tab == "Instruments":
         return data_instruments.render()
+    if tab == "Composites":
+        return data_composites.render()
+    if tab == "Config":
+        return data_config.render()
+    if tab == "Backfill":
+        return data_backfill.render()
     if tab == "Run history":
         hist = jobs.history()
         if hist.empty:

@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 
 from core import theme, config
 from core.repo import market as repo
+from core.repo import settings
 from ui import universe
 
 RETURN_COLS = ["1D", "1W", "1M", "3M", "YTD", "Since"]
@@ -44,7 +45,7 @@ def render():
                 html.Label("Since", style={"fontSize": "11px",
                            "color": theme.SLATE, "marginRight": "8px"}),
                 dcc.DatePickerSingle(id="cmp-since",
-                                     date=config.MARKETS_SINCE_DEFAULT,
+                                     date=settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01"),
                                      display_format="DD MMM YYYY"),
             ], style={"display": "flex", "alignItems": "center"}),
         ], style={"display": "flex", "justifyContent": "space-between",
@@ -88,7 +89,7 @@ def render():
     State("cmp-sort", "data"),
 )
 def _table(store, since, _sorts, selected, sort):
-    since = since or config.MARKETS_SINCE_DEFAULT
+    since = since or settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01")
     trig = ctx.triggered_id
     if isinstance(trig, dict) and trig.get("type") == "cmp-sort":
         col = trig["col"]
@@ -214,7 +215,7 @@ def _seed(store, since):
     if not ids:
         return []
     table = repo.period_returns(fund_ids=ids,
-                                since_date=since or config.MARKETS_SINCE_DEFAULT)
+                                since_date=since or settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01"))
     if table.empty:
         return []
     return table.sort_values("YTD", ascending=False,
@@ -232,7 +233,7 @@ def _seed(store, since):
 )
 def _chart(selected, since, store):
     selected = selected or []
-    since = since or config.MARKETS_SINCE_DEFAULT
+    since = since or settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01")
 
     if not selected:
         return _blank("Tick instruments in the table to plot them"), "none selected"

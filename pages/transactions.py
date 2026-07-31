@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 
 from core import theme, config
 from core.repo import market as repo
+from core.repo import settings
 from ui import universe
 
 RETURN_COLS = ["1D", "1W", "1M", "3M", "YTD", "Since"]
@@ -42,7 +43,7 @@ def render():
             html.Div([
                 html.Label("Since", style={"fontSize": "11px",
                            "color": theme.SLATE, "marginRight": "8px"}),
-                dcc.DatePickerSingle(id="tx-since", date=config.MARKETS_SINCE_DEFAULT,
+                dcc.DatePickerSingle(id="tx-since", date=settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01"),
                                      display_format="DD MMM YYYY"),
             ], style={"display": "flex", "alignItems": "center"}),
         ], style={"display": "flex", "justifyContent": "space-between",
@@ -101,7 +102,7 @@ def render():
     State("tx-sort", "data"),
 )
 def _table(store, since, _sorts, selected, sort):
-    since = since or config.MARKETS_SINCE_DEFAULT
+    since = since or settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01")
     trig = ctx.triggered_id
     if isinstance(trig, dict) and trig.get("type") == "tx-sort":
         col = trig["col"]
@@ -238,7 +239,7 @@ def _chart(fid, start):
     if start is None:
         # Open at the configured floor, or the fund's first price if it
         # starts later than the floor.
-        floor = pd.Timestamp(config.MARKETS_CHART_START)
+        floor = pd.Timestamp(settings.get("MARKETS_CHART_START", "2020-01-01"))
         first = p["date"].min()
         start = max(floor, first).strftime("%Y-%m-%d")
     start_dt = pd.Timestamp(start)

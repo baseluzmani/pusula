@@ -181,12 +181,24 @@ def snapshot_values(snap_date: str) -> dict:
 
 
 def snapshot_category_history() -> pd.DataFrame:
-    """Category value per snapshot date, for the stacked-area chart.
-    Columns: date, category, value_gbp."""
+    """
+    Category value per snapshot date, for the stacked-area chart.
+
+    Derived from holdings and current instrument metadata for the same reason
+    as snapshot_category_values: a renamed category would otherwise split the
+    chart into two bands, one ending where the other begins.
+
+    Columns: date, category, value_gbp.
+    """
     df = db.query("""
-        SELECT ps.snap_date AS date, sc.category, sc.value_gbp
-        FROM snapshot_categories sc
-        JOIN portfolio_snapshots ps ON ps.id = sc.snapshot_id
+        SELECT ps.snap_date AS date,
+               CASE WHEN sh.fund_id LIKE 'CASH:%' THEN 'Cash'
+                    ELSE COALESCE(i.category, 'Other') END AS category,
+               SUM(sh.value_gbp) AS value_gbp
+        FROM snapshot_holdings sh
+        JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
+        LEFT JOIN instruments i ON i.fund_id = sh.fund_id
+        GROUP BY ps.snap_date, 2
         ORDER BY ps.snap_date
     """)
     if not df.empty:
@@ -226,20 +238,31 @@ def account_positions() -> pd.DataFrame:
 
 def snapshot_category_values(snap_date: str) -> dict:
     """
-    {category: value_gbp} frozen at that snapshot.
+    {category: value_gbp} at that snapshot, using today's categorisation.
 
-    Read from snapshot_categories rather than derived from holdings, because
-    the stored rows preserve how things were categorised at the time. Deriving
-    them would silently rewrite history whenever a fund is recategorised.
+    Derived from the frozen holdings joined to current instrument metadata,
+    rather than read from snapshot_categories. The stored rows preserve the
+    category *name* as it was, which sounds right until you rename one:
+    renaming "UK Passive" to "UK Equity" then splits into two rows, history
+    under the old name and today under the new, and the same money appears
+    twice.
+
+    A stored row cannot distinguish renaming a category from moving a fund
+    between categories, so it gets the rename case wrong. Deriving means the
+    whole history is presented under whatever taxonomy you use now - which is
+    also how the by-asset-type panel already worked, so the two now agree.
     """
     if not snap_date or snap_date == "none":
         return {}
     df = db.query("""
-        SELECT sc.category, SUM(sc.value_gbp) AS value_gbp
-        FROM snapshot_categories sc
-        JOIN portfolio_snapshots ps ON ps.id = sc.snapshot_id
+        SELECT CASE WHEN sh.fund_id LIKE 'CASH:%' THEN 'Cash'
+                    ELSE COALESCE(i.category, 'Other') END AS category,
+               SUM(sh.value_gbp) AS value_gbp
+        FROM snapshot_holdings sh
+        JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
+        LEFT JOIN instruments i ON i.fund_id = sh.fund_id
         WHERE ps.snap_date = ?
-        GROUP BY sc.category
+        GROUP BY 1
     """, (snap_date,))
     return dict(zip(df["category"], df["value_gbp"])) if not df.empty else {}
 

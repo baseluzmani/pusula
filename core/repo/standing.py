@@ -91,7 +91,7 @@ def account_usage() -> dict:
 # --- Instruments ----------------------------------------------------------
 
 INSTRUMENT_COLUMNS = ("name", "asset_type", "currency", "price_unit",
-                      "category", "active")
+                      "category", "active", "source", "source_id", "provider")
 
 
 def instruments(search: str = "", incomplete_only: bool = False,
@@ -107,6 +107,7 @@ def instruments(search: str = "", incomplete_only: bool = False,
     sql = ["""
         SELECT i.fund_id, i.name, i.asset_type, i.currency, i.price_unit,
                i.category, COALESCE(i.active, 1) AS active,
+               i.source, i.source_id, i.provider,
                (SELECT COUNT(*) FROM prices p WHERE p.fund_id = i.fund_id)
                    AS price_rows,
                (SELECT MAX(p.date) FROM prices p WHERE p.fund_id = i.fund_id)
@@ -144,12 +145,14 @@ def save_instruments(rows: list) -> int:
             conn.execute("""
                 UPDATE instruments
                 SET name = ?, asset_type = ?, currency = ?, price_unit = ?,
-                    category = ?, active = ?
+                    category = ?, active = ?, source = ?, source_id = ?,
+                    provider = ?
                 WHERE fund_id = ?
             """, (_clean(r.get("name")), _clean(r.get("asset_type")),
                   _clean(r.get("currency")), _clean(r.get("price_unit")),
                   _clean(r.get("category")), _int(r.get("active"), 1),
-                  fund_id))
+                  _clean(r.get("source")), _clean(r.get("source_id")),
+                  _clean(r.get("provider")), fund_id))
             written += 1
         conn.commit()
     return written
@@ -180,3 +183,50 @@ def _int(value, default=0):
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def create_instrument(ticker: str, source: str) -> tuple[bool, str]:
+    """
+    Create a bare instrument row from a ticker and a source.
+
+    Only the identifying fields are set - everything else is filled in on the
+    grid afterwards. That is deliberate: name, currency and price_unit are
+    easier to get right once the row exists and can be seen alongside its
+    neighbours.
+
+    fund_id is derived from the source, because the prefix is what every
+    importer and pricing branch keys on:
+        yahoo      YF:TICKER
+        ft         the FT identifier as-is, which is already unique
+        composite  COMPOSITE:NAME
+        manual     as given, so CASH: and ASSET: rows can be added
+    """
+    ticker = (ticker or "").strip()
+    source = (source or "").strip().lower()
+    if not ticker:
+        return False, "A ticker or identifier is required."
+    if source not in ("yahoo", "ft", "composite", "manual"):
+        return False, f"Unknown source '{source}'."
+
+    if source == "yahoo":
+        fund_id = f"YF:{ticker}"
+    elif source == "composite":
+        fund_id = ticker if ticker.startswith("COMPOSITE:") \
+            else f"COMPOSITE:{ticker}"
+    else:
+        fund_id = ticker
+
+    existing = db.query("SELECT name FROM instruments WHERE fund_id = ?",
+                        (fund_id,))
+    if not existing.empty:
+        return False, f"{fund_id} already exists."
+
+    # source_id is what the importer asks Yahoo or FT for. Without it the row
+    # would sit in the table and never fetch a price.
+    source_id = ticker if source in ("yahoo", "ft") else None
+    db.execute("""
+        INSERT INTO instruments (fund_id, name, source, source_id, active)
+        VALUES (?, ?, ?, ?, 1)
+    """, (fund_id, ticker, source, source_id))
+    return True, (f"Created {fund_id}. Fill in name, currency, price unit and "
+                  f"category below, then Save.")

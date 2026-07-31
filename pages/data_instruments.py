@@ -32,6 +32,9 @@ COLUMNS = [
     {"name": "Currency", "id": "currency", "editable": True},
     {"name": "Price unit", "id": "price_unit", "editable": True},
     {"name": "Category", "id": "category", "editable": True},
+    {"name": "Source", "id": "source", "editable": True},
+    {"name": "Source ID", "id": "source_id", "editable": True},
+    {"name": "Provider", "id": "provider", "editable": True},
     {"name": "Active", "id": "active", "editable": True, "type": "numeric"},
     {"name": "Prices", "id": "price_rows", "editable": False,
      "type": "numeric"},
@@ -67,6 +70,38 @@ def render():
                 "color": "#fff"}),
         ], style={"display": "flex", "justifyContent": "space-between",
                   "alignItems": "flex-start", "marginBottom": "12px"}),
+
+        # Create form: identifiers only. Everything else is easier to fill in
+        # on the grid, where the new row sits next to comparable ones.
+        html.Div([
+            html.Div([
+                html.Label("Add instrument", style={"fontSize": "10px",
+                           "fontWeight": 700, "letterSpacing": "0.06em",
+                           "textTransform": "uppercase", "color": theme.SLATE,
+                           "marginRight": "12px"}),
+                dcc.Input(id="ins-new-ticker", type="text", debounce=True,
+                          placeholder="Ticker or FT id, e.g. DFNS.L",
+                          style={"padding": "7px 10px", "fontSize": "12.5px",
+                                 "borderRadius": "5px", "width": "230px",
+                                 "border": f"1px solid {theme.LINE}"}),
+                dcc.Dropdown(id="ins-new-source", value="yahoo",
+                             clearable=False,
+                             options=[{"label": s_, "value": s_} for s_ in
+                                      ("yahoo", "ft", "composite", "manual")],
+                             style={"fontSize": "12.5px", "width": "140px"}),
+                html.Button("Create", id="ins-create", n_clicks=0, style={
+                    "padding": "7px 15px", "borderRadius": "5px",
+                    "fontSize": "12.5px", "fontWeight": 600,
+                    "cursor": "pointer", "border": "none",
+                    "backgroundColor": theme.NEEDLE, "color": "#fff"}),
+            ], style={"display": "flex", "alignItems": "center",
+                      "gap": "10px"}),
+            html.Div("Creates the row with its identifiers set. Fill in the "
+                     "rest below and Save - a yahoo row needs a source id or "
+                     "no importer will fetch it.",
+                     style={"fontSize": "11px", "color": theme.NEUTRAL,
+                            "marginTop": "6px"}),
+        ], style={**theme.CARD, "marginBottom": "12px"}),
 
         html.Div([
             dcc.Input(id="ins-search", type="text", debounce=True,
@@ -144,6 +179,18 @@ def _load(search, filters, _refresh):
     if missing:
         label += f" \u00b7 {missing} missing currency or price unit"
     return df.to_dict("records"), label
+
+
+@callback(
+    Output("ins-feedback", "children", allow_duplicate=True),
+    Output("ins-new-ticker", "value"),
+    Input("ins-create", "n_clicks"),
+    State("ins-new-ticker", "value"), State("ins-new-source", "value"),
+    prevent_initial_call=True,
+)
+def _create(_n, ticker, source):
+    ok, message = repo.create_instrument(ticker, source)
+    return _msg(message, ok), (None if ok else ticker)
 
 
 @callback(

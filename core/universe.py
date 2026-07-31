@@ -2,76 +2,85 @@
 The instrument universe: what you track, what it's called, and how composites
 are built.
 
-This is DATA, not settings. core/config.py holds settings (paths, ports,
-thresholds); this holds the list of things you own and follow. The old
-config.py mixed the two, which is why it grew to 390 lines.
+This module used to load FTScrapper's config.py by file path. That stopped
+working correctly when the ticker lists moved into `instruments`: FUNDS,
+YAHOO_TICKERS, FUND_ID_MAP and ETF_PROVIDER_MAP no longer existed in that
+file, and every accessor here fell through to its getattr default and
+returned an empty list or dict. Silently - which is why the ETF tab lost its
+labels and providers without anything raising.
 
-During the parallel run this module READS the legacy config.py rather than
-copying it, for the same reason both apps share one database: two copies of
-the same list will drift. At cutover the definitions move in here and the
-loader is deleted.
+It is now a thin façade over the repos that hold the real data:
+
+    core.repo.tickers     instruments -> ticker lists, id maps
+    core.repo.composites  composites / composite_components
+
+The façade is kept rather than having callers import the repos directly,
+because the derived helpers below - etf_names, label, composite - are used
+across several pages and belong somewhere shared.
 """
-import importlib.util
-from functools import lru_cache
 
-from core import config
-
-
-@lru_cache(maxsize=1)
-def _legacy():
-    path = config.LEGACY_DIR / "config.py"
-    if not path.exists():
-        raise FileNotFoundError(
-            f"Legacy config not found at {path}. Set LEGACY_DIR in core/config.py.")
-    spec = importlib.util.spec_from_file_location("_legacy_config", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from core.repo import composites as _composites
+from core.repo import tickers as _tickers
 
 
 def reload() -> None:
-    """Pick up edits to the legacy config without restarting the service."""
-    _legacy.cache_clear()
+    """No-op. Kept so existing callers do not break: the definitions come
+    from the database now, so every read is already current and there is no
+    cached module to clear."""
+    return None
 
 
 # --- Accessors -----------------------------------------------------------
 
 def ft_funds() -> list[dict]:
     """Funds price-scraped from FT Markets."""
-    return getattr(_legacy(), "FUNDS", [])
+    return _tickers.ft_funds()
 
 
 def yahoo_tickers() -> list[tuple]:
     """(ticker, display_name, asset_type[, provider])"""
-    return getattr(_legacy(), "YAHOO_TICKERS", [])
+    return _tickers.yahoo_tickers()
 
 
 def composites() -> list[dict]:
     """Virtual funds blended from real ones. Weights sum to 1.0."""
-    return getattr(_legacy(), "COMPOSITE_FUNDS", [])
+    return _composites.definitions()
 
 
 def fund_id_map() -> dict:
     """Ticker prefix -> canonical fund_id, e.g. SPGP -> YF:SPGP.L"""
-    return getattr(_legacy(), "FUND_ID_MAP", {})
+    return _tickers.fund_id_map()
 
 
 def etf_provider_map() -> dict:
     """Ticker prefix -> parser name, e.g. SPGP -> ishares"""
-    return getattr(_legacy(), "ETF_PROVIDER_MAP", {})
+    return _tickers.etf_provider_map()
 
 
 def holding_accounts() -> dict:
-    return getattr(_legacy(), "HOLDING_ACCOUNTS", {})
+    return _composites.holding_accounts()
 
 
 # --- Derived -------------------------------------------------------------
+
+def _is_etf(row) -> bool:
+    """An ETF for labelling purposes.
+
+    The old test was asset_type == 'ETF' alone. A row now also counts if it
+    carries a holdings provider: provider is what actually drives the ETF
+    tab, and an instrument with a parser configured but a looser asset_type
+    would otherwise vanish from the labels while still being imported.
+    """
+    asset_type = (row[2] or "").strip().upper() if len(row) > 2 else ""
+    has_provider = len(row) > 3 and bool(row[3])
+    return asset_type == "ETF" or has_provider
+
 
 def etf_names() -> dict[str, str]:
     """fund_id -> display label, for ETFs with a holdings provider."""
     out = {}
     for t in yahoo_tickers():
-        if t[2] != "ETF":
+        if not _is_etf(t):
             continue
         ticker = t[0]
         short = ticker.replace(".L", "").replace(".IS", "")
@@ -81,8 +90,8 @@ def etf_names() -> dict[str, str]:
 
 def etf_providers() -> dict[str, str]:
     """fund_id -> provider name, or '-' if price-tracked only."""
-    return {f"YF:{t[0]}": (t[3] if len(t) == 4 else "-")
-            for t in yahoo_tickers() if t[2] == "ETF"}
+    return {f"YF:{t[0]}": (t[3] if len(t) == 4 and t[3] else "-")
+            for t in yahoo_tickers() if _is_etf(t)}
 
 
 def composite(fund_id: str) -> dict | None:

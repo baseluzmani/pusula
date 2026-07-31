@@ -10,7 +10,7 @@ import dash
 from dash import html, dcc, callback, Input, Output
 
 from pages import (portfolio_holdings, portfolio_pnl, portfolio_txns,
-                   portfolio_accounts, portfolio_charts, portfolio_summary)
+                   portfolio_accounts, portfolio_charts, portfolio_summary, portfolio_inputs)
 
 dash.register_page(__name__, path="/", name="Portfolio", order=1)
 
@@ -22,6 +22,7 @@ TABS = {
     "Portfolio": portfolio_holdings.render,
     "Charts": portfolio_charts.render,
     "Summary": portfolio_summary.render,
+    "Inputs": portfolio_inputs.render,
 }
 
 

@@ -1,6 +1,11 @@
 """
-Central configuration. Every path, port and secret comes from here.
-Nothing else in the codebase should hardcode a file location.
+Central configuration.
+
+Locations and startup constants only. Anything you might retune — thresholds,
+default dates, tax-year limits — lives in app_settings and is edited from
+Data → Config; anything list-like lives in its own table. This file holds the
+things that must be known before the database can be opened, which is exactly
+why they cannot come from it.
 """
 import os
 from pathlib import Path
@@ -13,21 +18,23 @@ ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(ROOT / ".env")
 
 # --- Database ------------------------------------------------------------
-# Single shared file, also used by the legacy dashboards.
-# ADDITIVE SCHEMA CHANGES ONLY while both are running.
-DB_PATH = Path.home() / "FTScrapper" / "data" / "funds.db"
+# Outside any app directory: this outlived FTScrapper and should not be
+# nested inside whatever replaces Pusula either.
+DB_PATH = Path.home() / "data" / "funds.db"
 
 # --- Folders -------------------------------------------------------------
 INBOX_DIR = ROOT / "inbox"          # drop provider files here for importers
 SCRIPTS_DIR = ROOT / "scripts"
 
-# Legacy FTScrapper tree. Importer scripts still live there and are invoked
-# in place until they are migrated. Remove once importers/ owns the logic.
-LEGACY_DIR = Path.home() / "FTScrapper"
+# Absolute, off ROOT. These were relative strings that only resolved because
+# the scripts were run with cwd set to the FTScrapper tree.
+IMPORT_DIR  = ROOT / "data" / "etf_holdings_import" / "input"
+ARCHIVE_DIR = ROOT / "data" / "etf_holdings_import" / "archive"
+EXCEL_PATH  = ROOT / "data" / "Funds Database.xlsx"
 
 # --- App -----------------------------------------------------------------
 APP_NAME = "Pusula"
-PORT = 8060                          # old dashboards keep 8050-8053
+PORT = 8060
 DEBUG = True
 
 # --- Secrets (never committed; live in .env) -----------------------------
@@ -51,12 +58,8 @@ def check() -> list[str]:
         problems.append(f"Database not found: {DB_PATH}")
     if not INBOX_DIR.exists():
         problems.append(f"Inbox folder not found: {INBOX_DIR}")
+    if not IMPORT_DIR.exists():
+        problems.append(f"ETF import folder not found: {IMPORT_DIR}")
     if not OPENFIGI_API_KEY:
         problems.append("OPENFIGI_API_KEY not set in .env")
     return problems
-
-# --- Markets --------------------------------------------------------
-# Earliest date shown on price charts by default (the "From" floor).
-MARKETS_CHART_START = "2020-01-01"
-# Default baseline for the "Since" return column and rebased Compare chart.
-MARKETS_SINCE_DEFAULT = "2026-03-01"

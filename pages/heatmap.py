@@ -16,6 +16,7 @@ import pandas as pd
 
 from core import theme, config
 from core.repo import market as repo
+from core.repo import settings
 from ui import universe
 
 # Columns shown in the grid, in order.
@@ -53,7 +54,7 @@ def render():
                     html.Label("Since", style={"fontSize": "11px",
                                "color": theme.SLATE, "margin": "0 6px 0 18px"}),
                     dcc.DatePickerSingle(id="hm-since",
-                                         date=config.MARKETS_SINCE_DEFAULT,
+                                         date=settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01"),
                                          display_format="DD MMM YYYY"),
                 ], style={"display": "flex", "alignItems": "center"}),
             ], style={"display": "flex", "alignItems": "center",
@@ -75,7 +76,7 @@ def render():
     Input("hm-since", "date"),
 )
 def _grid(store, sort_col, group, since):
-    since = since or config.MARKETS_SINCE_DEFAULT
+    since = since or settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01")
     sort_col = sort_col if sort_col in HEAT_COLS else "YTD"
     grouped = "on" in (group or [])
 
