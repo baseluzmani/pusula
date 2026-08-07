@@ -24,15 +24,6 @@ import pandas as pd
 from core import theme, finance as fin
 from core.repo import portfolio as repo
 
-try:
-    import config as legacy_config
-    COMPOSITE_FUNDS = getattr(legacy_config, "COMPOSITE_FUNDS", [])
-except Exception:                                              # noqa: BLE001
-    COMPOSITE_FUNDS = []
-
-_COMP = {c["fund_id"]: c for c in COMPOSITE_FUNDS}
-
-
 def render():
     return html.Div([
         html.Div([
@@ -98,9 +89,15 @@ def _toggle_compact(_, state):
     Input("pnl-closed", "data"), Input("pnl-compact", "data"),
 )
 def _table(show_closed, compact):
-    prices = repo.prices()
     instruments = repo.instruments()
     txns = repo.transactions()
+    if txns.empty:
+        return _msg("No transactions found.")
+
+    # Only the funds the ledger mentions, plus the FX crosses fx_rates reads.
+    # Composites are priced from the table too, so they come in by name.
+    wanted = set(txns["fund_id"]) | {"YF:GBPUSD=X", "YF:GBPTRY=X"}
+    prices = repo.prices(fund_ids=wanted)
     if txns.empty:
         return _msg("No transactions found.")
 
@@ -146,7 +143,6 @@ def _table(show_closed, compact):
     return html.Table([_header(compact), html.Tbody(body)],
                       style={"width": "100%", "borderCollapse": "collapse"})
 
-
 def _compute(txns, instruments, price_map, rates, gbpusd):
     rows = []
     for fid, g in txns.groupby("fund_id", sort=False):
@@ -157,14 +153,19 @@ def _compute(txns, instruments, price_map, rates, gbpusd):
         tmp = fin.position_pnl(g, None)
         if tmp["qty"] <= 0:
             cur = None
-        elif fid.startswith("COMPOSITE:"):
-            cd = _COMP.get(fid)
-            cur = (fin.composite_price_gbp(fid, cd["components"], price_map.get,
-                   instruments, gbpusd, rates) if cd else None)
-        elif fid.startswith(("CASH:", "ASSET:")):
+        elif fid.startswith(("ASSET:", "LIABILITY:")):
+            # The house and the mortgage have no meaningful cost basis: their
+            # transactions are milestones, not purchases. Skipped rather than
+            # priced, or the house reads as a 100% loss against a cost that
+            # was never paid.
+            continue
+        elif fid.startswith("CASH:"):
             cur = 1.0
         else:
-            cur = fin.to_gbp(price_map.get(fid), punit, curr, gbpusd, rates)
+            # Composites need no branch of their own: their price is written
+            # into prices in GBP by importers/composites.py, so price_map
+            # holds it like any other instrument.
+            cur = fin.to_gbp(price_map.get(fid), punit, curr, gbpusd, rates)    
 
         res = fin.position_pnl(g, cur)
         if res["pnl"] is None:
@@ -174,7 +175,6 @@ def _compute(txns, instruments, price_map, rates, gbpusd):
         res["Category"] = inst.get("category", "\u2014")
         rows.append(res)
     return rows
-
 
 def _ranges(open_df, ret_map):
     out = {}

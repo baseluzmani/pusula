@@ -240,21 +240,47 @@ def returns_map(prices: pd.DataFrame, fund_ids=None) -> dict:
     Replaces per-row calc_return calls (each of which rescanned the whole
     price frame). Periods: 1D=1, 1W=5, 1M=21, 3M=63 calendar-day lookbacks,
     plus YTD from last year's final weekday. Percentages.
+
+    Every fund is measured from the same date - the latest in the frame - not
+    from its own last price. Anchoring per fund meant a fund that last
+    published on Thursday computed its "1D" against Wednesday and showed it
+    beside funds measuring Friday against Thursday: different periods in the
+    same column. A fund with no price at the anchor date returns None for 1D
+    rather than a stale figure dressed as a daily move.
     """
     periods = {"1D": 1, "1W": 5, "1M": 21, "3M": 63}
     ytd = pd.Timestamp(ytd_date())
     df = prices if fund_ids is None else prices[prices["fund_id"].isin(fund_ids)]
+    if df.empty:
+        return {}
+
+    anchor = df["date"].max()
     out = {}
     for fid, g in df.sort_values("date").groupby("fund_id"):
         closes = g.set_index("date")["close"]
-        last = closes.iloc[-1]
-        last_date = closes.index[-1]
+
+        # The latest close at or before the anchor, so a fund that did not
+        # trade today is still measured to today rather than to its own last
+        # print.
+        at_anchor = closes[closes.index <= anchor]
+        if at_anchor.empty:
+            out[fid] = {k: None for k in list(periods) + ["YTD"]}
+            continue
+        last = at_anchor.iloc[-1]
+        last_date = at_anchor.index[-1]
+
         r = {}
         for label, days in periods.items():
-            cutoff = last_date - timedelta(days=days)
+            cutoff = anchor - timedelta(days=days)
             prior = closes[closes.index <= cutoff]
+            if label == "1D" and last_date <= cutoff:
+                # The fund has not priced since the comparison point, so there
+                # is no one-day move to report - only a gap.
+                r[label] = None
+                continue
             r[label] = (round((last / prior.iloc[-1] - 1) * 100, 2)
                         if not prior.empty and prior.iloc[-1] else None)
+
         prior_ytd = closes[closes.index <= ytd]
         r["YTD"] = (round((last / prior_ytd.iloc[-1] - 1) * 100, 2)
                     if not prior_ytd.empty and prior_ytd.iloc[-1] else None)

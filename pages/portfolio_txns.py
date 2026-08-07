@@ -36,14 +36,6 @@ import pandas as pd
 from core import theme, finance as fin
 from core.repo import portfolio as repo
 
-try:
-    import config as legacy_config
-    COMPOSITE_FUNDS = getattr(legacy_config, "COMPOSITE_FUNDS", [])
-except Exception:                                              # noqa: BLE001
-    COMPOSITE_FUNDS = []
-
-_COMP = {c["fund_id"]: c for c in COMPOSITE_FUNDS}
-
 TYPE_COLOURS = {"BUY": "#2E6FB5", "SELL": theme.NEGATIVE,
                 "DIVIDEND": theme.POSITIVE}
 
@@ -119,7 +111,7 @@ def _table(funds, date_from, date_to, txn_type):
         return _msg("No transactions match these filters.")
 
     instruments = repo.instruments()
-    prices = repo.prices()
+    prices = repo.latest_prices()
     rates = fin.fx_rates(prices)
     gbpusd = rates["USD"]
     # One pass for every fund's latest close, instead of a full scan per row.
@@ -139,17 +131,14 @@ def _latest(fid, instruments, price_map, gbpusd, rates, punit, curr):
     """
     Latest price for one fund as (display_string, gbp_value).
 
-    Composites have no market price of their own, so they are valued from
-    their components in GBP - the same way the P&L tab does it - rather than
-    from the rebased index series the legacy code used. Cash and fixed assets
-    are worth their face value.
+    Composites need no special case any more: importers/composites.py writes a
+    real GBP price into prices, and their instruments row says GBP and 'pound',
+    so the generic path below handles them. They used to be valued here from
+    their components, which was one of two competing pricings of the same
+    thing.
+
+    Cash and fixed assets are worth their face value.
     """
-    if fid.startswith("COMPOSITE:"):
-        cd = _COMP.get(fid)
-        gbp = (fin.composite_price_gbp(fid, cd["components"], price_map.get,
-                                       instruments, gbpusd, rates)
-               if cd else None)
-        return (_fmt(gbp, symbol="\u00A3") if gbp else "\u2014"), gbp
     if fid.startswith(("CASH:", "ASSET:")):
         return "\u2014", 1.0
     raw = price_map.get(fid)

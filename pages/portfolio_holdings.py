@@ -72,6 +72,10 @@ def render():
                     html.Div("By asset type", style=theme.CARD_TITLE),
                     html.Div(id="pf-by-type"),
                 ], style=theme.CARD),
+                html.Div([
+                    html.Div("By account", style=theme.CARD_TITLE),
+                    html.Div(id="pf-by-account"),
+                ], style={**theme.CARD, "marginTop": "12px"}),
             ], style={"flexShrink": "0", "width": "380px",
                       "overflowY": "auto", "maxHeight": "calc(100vh - 210px)"}),
         ], style={"display": "flex", "alignItems": "flex-start"}),
@@ -83,7 +87,7 @@ def render():
 def _rows(snap_date):
     """Valued holdings plus cash, with the native price kept for display."""
     instruments = repo.instruments()
-    prices = repo.prices()
+    prices = repo.latest_prices()
     rates = fin.fx_rates(prices)
     price_map = fin.latest_price_map(prices)
 
@@ -94,7 +98,16 @@ def _rows(snap_date):
         inst = instruments.get(r["fund_id"], {})
         r["currency"] = inst.get("currency") or "GBP"
         r["price_unit"] = inst.get("price_unit") or "pound"
-        r["native_price"] = price_map.get(r["fund_id"])
+        if r["fund_id"].startswith("COMPOSITE:"):
+            # A composite has no native price. price_map holds its derived
+            # series, computed differently from the value beside it - which is
+            # why the column read 142 next to a value implying 0.0611. Use the
+            # same GBP figure the value came from, so units x price = value.
+            r["native_price"] = r.get("price_gbp")
+            r["currency"] = "GBP"
+            r["price_unit"] = "pound"
+        else:
+            r["native_price"] = price_map.get(r["fund_id"])
 
     cash_total = val.cash_total_gbp(repo.cash_accounts(), rates)
     if cash_total:
@@ -128,6 +141,7 @@ def _with_exits(rows, snap):
 @callback(
     Output("pf-holdings", "children"), Output("pf-total", "children"),
     Output("pf-by-category", "children"), Output("pf-by-type", "children"),
+    Output("pf-by-account", "children"),
     Input("pf-snapshot", "value"),
 )
 def _render(snap_date):
@@ -150,7 +164,9 @@ def _render(snap_date):
                       repo.snapshot_category_values(snap_date), show, label)
     types = _breakdown(rows, "asset_type", total,
                        repo.snapshot_asset_type_values(snap_date), show, label)
-    return table, f"\u00A3{total:,.0f}", cats, types
+    accounts = _account_breakdown(total, repo.snapshot_account_values(snap_date),
+                                  show, label)
+    return table, f"\u00A3{total:,.0f}", cats, types, accounts
 
 
 # --- holdings table -------------------------------------------------------
@@ -347,9 +363,95 @@ def _fmt_price(r):
     if r.get("price_unit") == "pence":
         return f"{price:,.1f}p"
     sym = CURRENCY_SYMBOLS.get(r.get("currency"), "")
-    return f"{sym}{price:,.2f}" if abs(price) < 100 else f"{sym}{price:,.0f}"
+    if abs(price) < 1:
+        return f"{sym}{price:,.4f}"      # pension units price in fractions
+    if abs(price) < 100:
+        return f"{sym}{price:,.2f}"
+    return f"{sym}{price:,.0f}"
 
 
 def _msg(text):
     return html.P(text, style={"color": theme.NEUTRAL, "fontSize": "12px",
                                "padding": "14px"})
+
+def _account_breakdown(total, snap_values, show, label):
+    """Current value per account, from the ledger rather than from holdings.
+
+    Holdings carry no account - it lives on the transactions - so this comes
+    from account_positions() and is priced the same way the rows above are.
+    """
+    instruments = repo.instruments()
+    prices = repo.latest_prices()
+    rates = fin.fx_rates(prices)
+    price_map = fin.latest_price_map(prices)
+
+    grouped = {}
+    pos = repo.account_positions()
+    for r in pos.itertuples():
+        price = val.holding_price_gbp(r.fund_id, instruments, price_map,
+                                      rates["USD"], rates)
+        if price is None:
+            continue
+        grouped[r.account] = grouped.get(r.account, 0.0) + price * float(r.units)
+
+    for acc in repo.cash_accounts().to_dict("records"):
+        v = val.cash_to_gbp(float(acc.get("amount") or 0),
+                            acc.get("currency") or "GBP", rates)
+        name = acc.get("name")
+        grouped[name] = grouped.get(name, 0.0) + v
+
+    for name in snap_values:
+        grouped.setdefault(name, 0.0)
+
+    order = sorted(grouped.items(), key=lambda kv: kv[1], reverse=True)
+
+    head = [html.Th("", style=_bh("left")), html.Th("\u00A3k", style=_bh()),
+            html.Th("%", style=_bh())]
+    if show:
+        head += [html.Th(f"{label} \u00A3k", style=_bh()),
+                 html.Th("Chg", style=_bh())]
+
+    body = []
+    for name, value in order:
+        pct = (value / total * 100) if total else None
+        cells = [
+            html.Td(name or "\u2014",
+                    style={"padding": "3px 6px", "fontSize": "11px",
+                           "color": theme.INK, "whiteSpace": "nowrap",
+                           "maxWidth": "140px", "overflow": "hidden",
+                           "textOverflow": "ellipsis"}),
+            _num(f"{value/1000:,.1f}", theme.INK, 600, pad="3px 6px"),
+            _num(f"{pct:.1f}%" if pct is not None else "\u2014", theme.SLATE,
+                 pad="3px 6px"),
+        ]
+        if show:
+            prior = val.clean(snap_values.get(name)) or 0.0
+            chg = value - prior
+            colour = theme.POSITIVE if chg >= 0 else theme.NEGATIVE
+            cells += [
+                _num(f"{prior/1000:,.1f}", theme.NEUTRAL, pad="3px 6px"),
+                _num(f"{chg/1000:+,.1f}", colour, 600, pad="3px 6px"),
+            ]
+        body.append(html.Tr(cells,
+                            style={"borderTop": f"1px solid {theme.LINE}"}))
+
+    tb = {"padding": "5px 6px", "fontSize": "11.5px", "textAlign": "right",
+          **theme.NUM, "fontWeight": 700,
+          "borderTop": f"2px solid {theme.INK}"}
+    grand = sum(grouped.values())
+    total_cells = [html.Td("Total", style={**tb, "textAlign": "left"}),
+                   html.Td(f"{grand/1000:,.1f}", style=tb),
+                   html.Td("", style={"borderTop": f"2px solid {theme.INK}"})]
+    if show:
+        prior_total = val.total(snap_values.values())
+        chg = grand - prior_total
+        colour = theme.POSITIVE if chg >= 0 else theme.NEGATIVE
+        total_cells += [
+            html.Td(f"{prior_total/1000:,.1f}",
+                    style={**tb, "color": theme.NEUTRAL}),
+            html.Td(f"{chg/1000:+,.1f}", style={**tb, "color": colour}),
+        ]
+    body.append(html.Tr(total_cells))
+
+    return html.Table([html.Thead(html.Tr(head)), html.Tbody(body)],
+                      style={"width": "100%", "borderCollapse": "collapse"})

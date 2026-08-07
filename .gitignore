@@ -9,5 +9,6 @@ inbox/
 *.xlsx
 *.xls
 .env
-.DS_Storelogs/
+.DS_Store
 logs/
+*.zip

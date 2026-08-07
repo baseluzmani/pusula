@@ -55,7 +55,7 @@ def render():
 @callback(Output("psum-table", "children"), Input("psum-snapshot", "value"))
 def _summary(snap_date):
     instruments = repo.instruments()
-    prices = repo.prices()
+    prices = repo.latest_prices()
     rates = fin.fx_rates(prices)
     gbpusd = rates["USD"]
     price_map = fin.latest_price_map(prices)

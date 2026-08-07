@@ -6,14 +6,23 @@ holding is worth" in four places - Accounts, Summary, Charts and Portfolio -
 each with its own copy of the composite/cash/asset branching. This module has
 it once.
 
-Four kinds of holding are priced differently:
+Three kinds of holding are priced differently:
 
-  COMPOSITE:  no market price of its own; valued from its components' latest
-              prices, weighted per the stored definition
   CASH:       face value, with CASH:TRY quoted as a point series
   ASSET:      face value (a house, for instance)
   everything  latest close converted to GBP by price_unit and currency
   else
+
+Composites used to be a fourth case, priced here from their components while
+importers/composites.py separately wrote a rebased index into prices. Two
+independent pricings of the same thing, which disagreed: the Portfolio tab
+showed a price of 142 for Sharia beside a value implying 0.0611.
+
+There is now one. importers/composites.py writes a real GBP price into prices,
+and a composite is read from there like any other instrument - its instruments
+row says GBP and 'pound', so the generic branch below handles it. The rebuild
+is chained after every price import, including the intraday ones, so the
+stored price is as current as its components.
 
 No Dash imports, no SQL - just functions over data handed in, so the same code
 serves every tab and can be tested directly.
@@ -29,15 +38,10 @@ from core.repo import settings as settings_repo
 
 
 # --- Configuration --------------------------------------------------------
-# Composite definitions, account mappings and chart settings used to be read
-# out of FTScrapper's config.py by file location, because Pusula is not on
-# that import path. They are now rows in the database, editable from
-# Data -> Composites and Data -> Config. The function signatures are
-# unchanged, so every caller carries on working.
 
 def composite_definitions() -> list:
-    """Component weights that let pension and other blended funds be marked
-    daily from their underlying prices."""
+    """Component weights. Still used for labels and by the composites
+    importer; no longer used to price anything at display time."""
     return comp_repo.definitions()
 
 
@@ -51,8 +55,8 @@ def chart_category_threshold(default: float = 0.02) -> float:
 
 
 def reload_config():
-    """Kept so existing callers do not break. Nothing to clear now that the
-    definitions come from the database - every read is already current."""
+    """Kept so existing callers do not break. Definitions come from the
+    database now, so every read is already current."""
     return None
 
 
@@ -62,26 +66,30 @@ def holding_price_gbp(fund_id, instruments, price_map, gbpusd, rates,
     Latest price of one holding in GBP, or None if it cannot be priced.
 
     price_map: {fund_id: latest native close}, from finance.latest_price_map.
-    composites: list of composite definitions.
+    composites: accepted and ignored. Kept so the many callers passing it do
+                not all need changing; composites are priced from price_map
+                like everything else now.
     """
     inst = instruments.get(fund_id, {})
     punit = inst.get("price_unit", "pound")
     curr = inst.get("currency", "GBP")
 
-    if fund_id.startswith("COMPOSITE:"):
-        if composites is None:
-            composites = composite_definitions()
-        comp = _composite(fund_id, composites)
-        if not comp:
-            return None
-        return fin.composite_price_gbp(fund_id, comp["components"],
-                                       price_map.get, instruments, gbpusd,
-                                       rates)
-
-    if fund_id.startswith(("CASH:", "ASSET:")):
+    if fund_id.startswith("CASH:"):
         # CASH:TRY is held as a point series, so it needs the TRY cross.
         effective_unit = "point" if fund_id == "CASH:TRY" else punit
         return fin.to_gbp(1.0, effective_unit, curr, gbpusd, rates)
+
+    # ASSET: and LIABILITY: are priced like anything else now - the house from
+    # a monthly Zoopla figure, the mortgage from its statement balance, both
+    # entered under Data -> Manual prices and filled forward. They used to
+    # fall into the face-value branch above, which was correct only while they
+    # had no price series of their own. The fallback stays for the window
+    # before the first entry.
+    if fund_id.startswith(("ASSET:", "LIABILITY:")):
+        raw = price_map.get(fund_id)
+        if raw is None:
+            return fin.to_gbp(1.0, punit, curr, gbpusd, rates)
+        return fin.to_gbp(raw, punit, curr, gbpusd, rates)
 
     raw = price_map.get(fund_id)
     if raw is None:
@@ -102,8 +110,6 @@ def value_holdings(holdings, instruments, price_map, gbpusd, rates,
     price_gbp, value. Unpriceable holdings keep a null value rather than being
     dropped, so they stay visible.
     """
-    if composites is None:
-        composites = composite_definitions()
     if isinstance(holdings, pd.DataFrame):
         rows = holdings.to_dict("records")
     else:
@@ -116,8 +122,7 @@ def value_holdings(holdings, instruments, price_map, gbpusd, rates,
             continue
         units = float(h.get("units") or 0)
         inst = instruments.get(fid, {})
-        price = holding_price_gbp(fid, instruments, price_map, gbpusd, rates,
-                                  composites)
+        price = holding_price_gbp(fid, instruments, price_map, gbpusd, rates)
         out.append({
             "fund_id": fid,
             "name": inst.get("name") or fid,
@@ -172,13 +177,6 @@ def clean(value):
 def total(values) -> float:
     """Sum, skipping missing and NaN entries."""
     return sum(v for v in (clean(x) for x in values) if v is not None)
-
-
-def _composite(fund_id, composites):
-    for c in (composites or []):
-        if c.get("fund_id") == fund_id:
-            return c
-    return None
 
 
 def _records(data):

@@ -57,7 +57,7 @@ def render():
           Input("pf-tabs", "value"))
 def _accounts(_tab):
     instruments = repo.instruments()
-    prices = repo.prices()
+    prices = repo.latest_prices()
     rates = fin.fx_rates(prices)
     gbpusd = rates["USD"]
     price_map = fin.latest_price_map(prices)
@@ -76,8 +76,12 @@ def _accounts(_tab):
     # Holdings pinned to an account in config, valued from portfolio_holdings.
     holdings = {h["fund_id"]: h["units"]
                 for h in repo.holdings().to_dict("records")}
+    # Anything already placed by the ledger is skipped: the static mapping
+    # exists for holdings with no transactions, and the composites gained a
+    # transaction history, so they were being counted twice.
+    from_ledger = set(positions["fund_id"]) if not positions.empty else set()
     for fid, account in (_holding_accounts() or {}).items():
-        if fid not in holdings:
+        if fid not in holdings or fid in from_ledger:
             continue
         inst = instruments.get(fid, {})
         by_account[account].append(

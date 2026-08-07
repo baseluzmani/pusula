@@ -39,6 +39,7 @@ DEBUG = True
 
 # --- Secrets (never committed; live in .env) -----------------------------
 OPENFIGI_API_KEY = os.environ.get("OPENFIGI_API_KEY", "")
+FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 
 # --- OpenFIGI ------------------------------------------------------------
 FIGI_URL = "https://api.openfigi.com/v3/mapping"

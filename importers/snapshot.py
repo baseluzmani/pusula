@@ -40,27 +40,21 @@ def _first_working_day(today: date) -> date:
 
 def _write_networth(conn, today: date, total: float):
     """
-    One permanent row per month, plus a rolling row for today.
+    One row per day, kept.
 
-    Month starts are kept forever; intra-month figures are replaced as they go,
-    so the table stays a monthly series rather than accumulating a row a day.
+    This used to keep a permanent row for the first weekday of each month and
+    delete every other snapshot row on each run, so the table stayed a monthly
+    series. The history rebuild now writes a row per day and the chart reads
+    all of them, so deleting was throwing away the series it exists to hold -
+    and the surviving month-start rows were marked 'permanent', which the
+    rebuild then had to work around.
     """
     stamp = today.strftime("%Y-%m-%d")
-    if today == _first_working_day(today):
-        conn.execute("""
-            INSERT OR REPLACE INTO networth_history (date, total_gbp, source)
-            VALUES (?, ?, 'permanent')
-        """, (stamp, round(total, 2)))
-        print(f"Month start saved permanently: GBP {total:,.0f} ({stamp})")
-        return
-
-    conn.execute("DELETE FROM networth_history "
-                 "WHERE source = 'snapshot' AND date != ?", (stamp,))
     conn.execute("""
-        INSERT OR REPLACE INTO networth_history (date, total_gbp, source)
+        INSERT INTO networth_history (date, total_gbp, source)
         VALUES (?, ?, 'snapshot')
+        ON CONFLICT(date) DO UPDATE SET total_gbp = excluded.total_gbp
     """, (stamp, round(total, 2)))
-    print(f"Today's networth saved: GBP {total:,.0f} ({stamp})")
 
 
 def run() -> dict:
@@ -139,15 +133,13 @@ def run() -> dict:
             """, (snap_id, acc.get("name"), currency, amount,
                   round(value_gbp, 2)))
 
-        # Cash also goes in as a single rollup row so snapshot_holdings alone
-        # sums to the portfolio total - which is what the comparison views read.
-        if cash_total:
-            conn.execute("""
-                INSERT INTO snapshot_holdings
-                    (snapshot_id, fund_id, units, value_gbp)
-                VALUES (?, 'CASH:TOTAL', NULL, ?)
-            """, (snap_id, round(cash_total, 2)))
-            total += cash_total
+        # Cash is not written into snapshot_holdings. It used to be, as a
+        # CASH:TOTAL rollup, so that table alone summed to the portfolio total
+        # - but it is also written to snapshot_cash above, and every view that
+        # reads both was double-counting it. The comparison queries now take
+        # cash from snapshot_cash and exclude CASH: rows from holdings.
+        
+        total += cash_total
 
         conn.execute("UPDATE portfolio_snapshots SET total_gbp = ? WHERE id = ?",
                      (round(total, 2), snap_id))

@@ -35,21 +35,67 @@ def instruments() -> dict:
 
 # --- Prices ---------------------------------------------------------------
 
-def prices() -> pd.DataFrame:
+def prices(since: str = None, fund_ids=None) -> pd.DataFrame:
     """Raw price history joined to instrument name/type. Columns:
-    fund_id, fund_name, asset_type, date, open, high, low, close, volume."""
-    df = db.query("""
+    fund_id, fund_name, asset_type, date, open, high, low, close, volume.
+
+    since and fund_ids bound the read. The table carries every instrument
+    tracked, including indices and commodities held only as indicators, while
+    most callers want a handful of funds they actually own - so filtering in
+    SQL against the index beats loading 212k rows and discarding most of them.
+    """
+    sql = """
         SELECT p.fund_id, i.name AS fund_name, i.asset_type, p.date,
                p.open, p.high, p.low, p.close, p.volume
         FROM prices p
         LEFT JOIN instruments i ON i.fund_id = p.fund_id
-        ORDER BY p.fund_id, p.date
-    """)
+    """
+    where, params = [], []
+    if since:
+        where.append("p.date >= ?")
+        params.append(since)
+    if fund_ids:
+        ids = list(fund_ids)
+        where.append(f"p.fund_id IN ({','.join('?' * len(ids))})")
+        params.extend(ids)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+
+    df = db.query(sql + " ORDER BY p.fund_id, p.date", tuple(params))
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"])
     return df
 
+def latest_prices() -> pd.DataFrame:
+    """One row per fund: its most recent close.
 
+    Every page did this in pandas over the full 212k-row price frame, which
+    prices() loads with a join and no filter. The two consumers -
+    latest_price_map and fx_rates - reduce that to about 160 values and throw
+    the rest away, so the work is better done where the index already is.
+
+    Columns: fund_id, date, close.
+    """
+    return db.query("""
+        SELECT p.fund_id, p.date, p.close
+        FROM prices p
+        JOIN (SELECT fund_id, MAX(date) AS d FROM prices GROUP BY fund_id) m
+          ON m.fund_id = p.fund_id AND m.d = p.date
+    """)
+
+def price_series(fund_id: str, since: str = None) -> pd.DataFrame:
+    """One fund's closes, date-indexed. Columns: date, close.
+
+    For callers that want a single series rather than the whole table -
+    the Indicators page was loading all 212k rows three times per render to
+    filter each one down to a few hundred.
+    """
+    sql = "SELECT date, close FROM prices WHERE fund_id = ?"
+    params = [fund_id]
+    if since:
+        sql += " AND date >= ?"
+        params.append(since)
+    return db.query(sql + " ORDER BY date", tuple(params))
 # --- Transactions ---------------------------------------------------------
 
 def transactions() -> pd.DataFrame:
@@ -173,8 +219,18 @@ def snapshot_values(snap_date: str) -> dict:
         SELECT sh.fund_id, sh.value_gbp
         FROM snapshot_holdings sh
         JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
+        WHERE ps.snap_date = ? AND sh.fund_id NOT LIKE 'CASH:%'
+        UNION ALL
+        -- Cash lives in snapshot_cash, not snapshot_holdings. It used to be
+        -- written to both, which double-counted every total from 24 April
+        -- until the history rebuild; now it has one home and is folded back
+        -- in here under the id the Portfolio tab uses for it.
+        SELECT 'CASH:TOTAL', SUM(sc.value_gbp)
+        FROM snapshot_cash sc
+        JOIN portfolio_snapshots ps ON ps.id = sc.snapshot_id
         WHERE ps.snap_date = ?
-    """, (snap_date,))
+        HAVING SUM(sc.value_gbp) IS NOT NULL
+    """, (snap_date, snap_date))
     if df.empty:
         return {}
     return dict(zip(df["fund_id"], df["value_gbp"]))
@@ -186,24 +242,31 @@ def snapshot_category_history() -> pd.DataFrame:
 
     Derived from holdings and current instrument metadata for the same reason
     as snapshot_category_values: a renamed category would otherwise split the
-    chart into two bands, one ending where the other begins.
+    history in two, the same money appearing under both names.
 
-    Columns: date, category, value_gbp.
+    Cash comes from snapshot_cash. It used to be written into
+    snapshot_holdings as well, which double-counted every total from 24 April
+    until the history rebuild; the rebuild removed those rows, which is why
+    cash vanished from this chart and why 3 May showed a spike that was never
+    real money.
     """
-    df = db.query("""
-        SELECT ps.snap_date AS date,
-               CASE WHEN sh.fund_id LIKE 'CASH:%' THEN 'Cash'
-                    ELSE COALESCE(i.category, 'Other') END AS category,
-               SUM(sh.value_gbp) AS value_gbp
-        FROM snapshot_holdings sh
-        JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
-        LEFT JOIN instruments i ON i.fund_id = sh.fund_id
-        GROUP BY ps.snap_date, 2
-        ORDER BY ps.snap_date
+    return db.query("""
+        SELECT date, category, SUM(value_gbp) AS value_gbp FROM (
+            SELECT ps.snap_date AS date,
+                   COALESCE(i.category, 'Other') AS category,
+                   sh.value_gbp
+            FROM snapshot_holdings sh
+            JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
+            LEFT JOIN instruments i ON i.fund_id = sh.fund_id
+            WHERE sh.fund_id NOT LIKE 'CASH:%'
+            UNION ALL
+            SELECT ps.snap_date, 'Cash', sc.value_gbp
+            FROM snapshot_cash sc
+            JOIN portfolio_snapshots ps ON ps.id = sc.snapshot_id
+        )
+        GROUP BY date, category
+        ORDER BY date, category
     """)
-    if not df.empty:
-        df["date"] = pd.to_datetime(df["date"])
-    return df
 
 
 def networth_history() -> pd.DataFrame:
@@ -221,8 +284,13 @@ def account_positions() -> pd.DataFrame:
     """
     Net quantity still held per account and fund, derived from transactions.
 
-    Only open positions (net quantity above a rounding tolerance). Columns:
-    account, fund_id, name, units.
+    Positions whose net quantity is not zero, in either direction. The test is
+    on the absolute value: a closed position nets to zero and is excluded, but
+    a liability is held short - the mortgage sits at -1 unit against the house
+    - and a positive-only test dropped it, understating the account total by
+    the whole outstanding balance.
+
+    Columns: account, fund_id, name, units.
     """
     return db.query("""
         SELECT t.account, t.fund_id, i.name,
@@ -231,7 +299,7 @@ def account_positions() -> pd.DataFrame:
         FROM transactions t
         LEFT JOIN instruments i ON i.fund_id = t.fund_id
         GROUP BY t.account, t.fund_id
-        HAVING units > 0.0001
+        HAVING ABS(units) > 0.0001
         ORDER BY t.account, i.name
     """)
 
@@ -255,15 +323,24 @@ def snapshot_category_values(snap_date: str) -> dict:
     if not snap_date or snap_date == "none":
         return {}
     df = db.query("""
-        SELECT CASE WHEN sh.fund_id LIKE 'CASH:%' THEN 'Cash'
-                    ELSE COALESCE(i.category, 'Other') END AS category,
-               SUM(sh.value_gbp) AS value_gbp
-        FROM snapshot_holdings sh
-        JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
-        LEFT JOIN instruments i ON i.fund_id = sh.fund_id
-        WHERE ps.snap_date = ?
-        GROUP BY 1
-    """, (snap_date,))
+        SELECT category, SUM(value_gbp) AS value_gbp FROM (
+            SELECT COALESCE(i.category, 'Other') AS category,
+                   sh.value_gbp
+            FROM snapshot_holdings sh
+            JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
+            LEFT JOIN instruments i ON i.fund_id = sh.fund_id
+            WHERE ps.snap_date = ? AND sh.fund_id NOT LIKE 'CASH:%'
+            UNION ALL
+            -- Cash has its own table. It used to be written to
+            -- snapshot_holdings as well, which double-counted every total
+            -- from 24 April until the history rebuild.
+            SELECT 'Cash', sc.value_gbp
+            FROM snapshot_cash sc
+            JOIN portfolio_snapshots ps ON ps.id = sc.snapshot_id
+            WHERE ps.snap_date = ?
+        )
+        GROUP BY category
+    """, (snap_date, snap_date))
     return dict(zip(df["category"], df["value_gbp"])) if not df.empty else {}
 
 
@@ -281,13 +358,89 @@ def snapshot_asset_type_values(snap_date: str) -> dict:
     # so they would fall into "Other" and fail to line up with the current
     # figures, where cash is its own asset type.
     df = db.query("""
-        SELECT CASE WHEN sh.fund_id LIKE 'CASH:%' THEN 'Cash'
-                    ELSE COALESCE(i.asset_type, 'Other') END AS asset_type,
-               SUM(sh.value_gbp) AS value_gbp
+        SELECT asset_type, SUM(value_gbp) AS value_gbp FROM (
+            SELECT COALESCE(i.asset_type, 'Other') AS asset_type,
+                   sh.value_gbp
+            FROM snapshot_holdings sh
+            JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
+            LEFT JOIN instruments i ON i.fund_id = sh.fund_id
+            WHERE ps.snap_date = ? AND sh.fund_id NOT LIKE 'CASH:%'
+            UNION ALL
+            SELECT 'Cash', sc.value_gbp
+            FROM snapshot_cash sc
+            JOIN portfolio_snapshots ps ON ps.id = sc.snapshot_id
+            WHERE ps.snap_date = ?
+        )
+        GROUP BY asset_type
+    """, (snap_date, snap_date))
+    return dict(zip(df["asset_type"], df["value_gbp"])) if not df.empty else {}
+
+def snapshot_account_values(snap_date: str) -> dict:
+    """
+    {account: value_gbp} at that snapshot.
+
+    Snapshots do not store an account, so each frozen holding is apportioned
+    across accounts by the units the ledger says were held in each - as at the
+    snapshot date, not as at today.
+
+    That distinction matters. Weighting by today's open positions put every
+    since-closed holding into Unassigned: 148k of it on 20 June, all of it
+    ETFs the ledger still has full account history for. Several spanned three
+    or four accounts, so a single fallback account would have misplaced them
+    rather than lost them. The split has to be the one in force on the day.
+
+    A holding still in Unassigned after this has no transactions at all before
+    the snapshot date, which is a gap in the ledger rather than a mapping
+    problem.
+
+    Cash comes from snapshot_cash, whose name column is the account.
+    """
+    if not snap_date or snap_date == "none":
+        return {}
+
+    # Fund -> {account: share of units}, from the ledger as at snap_date.
+    pos = db.query("""
+        SELECT account, fund_id,
+               SUM(CASE WHEN type='BUY'  THEN quantity ELSE 0 END) -
+               SUM(CASE WHEN type='SELL' THEN quantity ELSE 0 END) AS units
+        FROM transactions
+        WHERE type != 'DIVIDEND' AND trade_date <= ?
+        GROUP BY account, fund_id
+        HAVING ABS(units) > 0.0001
+    """, (snap_date,))
+
+    weights = {}
+    if not pos.empty:
+        totals = pos.groupby("fund_id")["units"].transform("sum")
+        pos = pos.assign(w=pos["units"] / totals.replace(0, pd.NA))
+        for r in pos.dropna(subset=["w"]).itertuples():
+            weights.setdefault(r.fund_id, {})[r.account] = float(r.w)
+
+    df = db.query("""
+        SELECT sh.fund_id, sh.value_gbp
         FROM snapshot_holdings sh
         JOIN portfolio_snapshots ps ON ps.id = sh.snapshot_id
-        LEFT JOIN instruments i ON i.fund_id = sh.fund_id
-        WHERE ps.snap_date = ?
-        GROUP BY 1
+        WHERE ps.snap_date = ? AND sh.fund_id NOT LIKE 'CASH:%'
     """, (snap_date,))
-    return dict(zip(df["asset_type"], df["value_gbp"])) if not df.empty else {}
+
+    out = {}
+    for r in df.itertuples():
+        value = float(r.value_gbp or 0)
+        split = weights.get(r.fund_id)
+        if not split:
+            out["Unassigned"] = out.get("Unassigned", 0.0) + value
+            continue
+        for account, share in split.items():
+            out[account] = out.get(account, 0.0) + value * share
+
+    cash = db.query("""
+        SELECT sc.name AS account, SUM(sc.value_gbp) AS value_gbp
+        FROM snapshot_cash sc
+        JOIN portfolio_snapshots ps ON ps.id = sc.snapshot_id
+        WHERE ps.snap_date = ?
+        GROUP BY sc.name
+    """, (snap_date,))
+    for r in cash.itertuples():
+        out[r.account] = out.get(r.account, 0.0) + float(r.value_gbp or 0)
+
+    return out
