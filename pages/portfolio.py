@@ -9,7 +9,7 @@ against the legacy engine.
 import dash
 from dash import html, dcc, callback, Input, Output
 
-from pages import (portfolio_holdings, portfolio_pnl, portfolio_txns,
+from pages import (portfolio_holdings, portfolio_pnl, pnl_analysis, portfolio_txns,
                    portfolio_accounts, portfolio_charts, portfolio_summary, portfolio_inputs)
 
 dash.register_page(__name__, path="/", name="Portfolio", order=1)
@@ -17,6 +17,7 @@ dash.register_page(__name__, path="/", name="Portfolio", order=1)
 TABS = {
     "Portfolio": portfolio_holdings.render,
     "P&L": portfolio_pnl.render,
+    "P&L ROCI": pnl_analysis.render,
     "Transactions": portfolio_txns.render,
     "Accounts": portfolio_accounts.render,
     "Portfolio": portfolio_holdings.render,
