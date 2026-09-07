@@ -50,12 +50,14 @@ unrealised P&L at a window start is not zero. That is a separate problem.
 
 from __future__ import annotations
 
-import os
-import sqlite3
 from dataclasses import dataclass, field
-from pathlib import Path
 
 import pandas as pd
+
+from core import db
+from core import finance as fin
+from core import valuation
+from core.repo import portfolio as repo
 
 # --------------------------------------------------------------------------
 # 1. DATA ACCESS
@@ -71,14 +73,10 @@ import pandas as pd
 # pence-quoted lines (HSBC, BHP, Shell) divide by 100.
 # fx_rate is units of `currency` per GBP: GBP cost = native / fx_rate.
 
-# core.config already holds the migrated settings, including DB_PATH. The env
-# var and literal are only fallbacks for running the engine outside the app.
-try:
-    from core import config as _config
-    DB_PATH = Path(getattr(_config, "DB_PATH", "")
-                   or os.getenv("PUSULA_DB", Path.home() / "data" / "funds.db"))
-except ImportError:
-    DB_PATH = Path(os.getenv("PUSULA_DB", Path.home() / "data" / "funds.db"))
+# Reads go through core.db.query, which opens the file read-only (mode=ro),
+# applies the lock timeout and guarantees the connection is closed. This module
+# therefore has no connection handling of its own and no DB_PATH: both come
+# from core.config via core.db, exactly like every other reader.
 
 # Commission: GBP trades carry a flat 4.00, which is clearly sterling. On a
 # USD trade it is ambiguous. True = treat it as trade currency and convert.
@@ -92,10 +90,6 @@ MINOR_UNITS = {"gbx", "p", "pence", "gbp_pence", "usc", "cents"}
 
 # Pseudo-instruments with no cost basis in the sense the engine assumes.
 EXCLUDED = {"CASH:TOTAL", "ASSET:HOUSE", "LIABILITY:MORTGAGE"}
-
-
-def _connect() -> sqlite3.Connection:
-    return sqlite3.connect(DB_PATH)
 
 
 TRADES_SQL = """
@@ -122,11 +116,10 @@ def load_trades() -> pd.DataFrame:
     Returns columns: date, instrument, name, qty (signed), cash_flow (signed:
     negative on a buy, positive on a sell).
     """
-    with _connect() as con:
-        df = pd.read_sql_query(TRADES_SQL, con)
+    df = db.query(TRADES_SQL)
 
     df = df[~df["instrument"].isin(EXCLUDED)].copy()
-    df["date"] = pd.to_datetime(df["trade_date"] if "trade_date" in df else df["date"])
+    df["date"] = pd.to_datetime(df["date"])
 
     df["qty"] = df["raw_qty"].where(df["type"] == "BUY", -df["raw_qty"])
 
@@ -144,62 +137,45 @@ def load_trades() -> pd.DataFrame:
     )
 
 
-LATEST_PRICE_SQL = """
-    SELECT p.fund_id                            AS fund_id,
-           p.close                              AS close,
-           UPPER(COALESCE(i.currency, 'GBP'))   AS currency,
-           LOWER(COALESCE(i.price_unit, ''))    AS price_unit
-    FROM prices p
-    JOIN (SELECT fund_id, MAX(date) AS d FROM prices GROUP BY fund_id) m
-      ON m.fund_id = p.fund_id AND m.d = p.date
-    LEFT JOIN instruments i ON i.fund_id = p.fund_id
-"""
+def load_latest_prices() -> tuple[dict[str, float], list[str], list[str]]:
+    """Latest mark per instrument, in GBP, from the same source as every
+    other tab.
 
+    This used to run its own SQL and convert non-GBP instruments using the FX
+    rate stored on that instrument's most recent trade. That is a historical
+    rate, so this page drifted from the P&L tab by however far sterling had
+    moved since the last trade - 5.6% on SEMI.L, which turned a -1,750
+    position into a -6,190 one.
 
-def load_latest_prices() -> tuple[dict[str, float], list[str]]:
-    """Latest close per instrument, converted to GBP.
+    Marks now come from core.valuation.holding_price_gbp, which applies the
+    live cross from YF:GBPUSD=X, so the two pages agree by construction.
+    Historical FX still governs cost: each transaction's own fx_rate is used
+    in load_trades, which is correct and unchanged. Current value at current
+    rates, historical cost at historical rates.
 
-    Returns (prices, approximated) where `approximated` lists instruments whose
-    price was converted using the FX rate from their most recent trade rather
-    than a live rate. That is an approximation and the page says so; GBP-quoted
-    instruments are exact.
+    Returns (prices, approximated, unpriceable). `approximated` is kept so the
+    page's banner keeps working but is now always empty - no mark is an
+    approximation any more. `unpriceable` lists instruments with no usable GBP
+    price; they are omitted from the dict rather than given a zero, because a
+    zero mark silently reports an open position as a total loss.
     """
-    with _connect() as con:
-        px = pd.read_sql_query(LATEST_PRICE_SQL, con)
-        fx_rows = pd.read_sql_query(
-            """
-            SELECT fund_id, currency, fx_rate FROM transactions t1
-            WHERE t1.trade_date = (
-                SELECT MAX(t2.trade_date) FROM transactions t2
-                WHERE t2.fund_id = t1.fund_id
-            )
-            """,
-            con,
-        )
-
-    last_fx = (
-        fx_rows.dropna(subset=["fx_rate"])
-        .drop_duplicates("fund_id", keep="last")
-        .set_index("fund_id")["fx_rate"]
-        .to_dict()
-    )
-
-    unit = px["price_unit"].str.strip().isin(MINOR_UNITS).map({True: 100.0, False: 1.0})
-    px["major"] = px["close"] / unit
+    price_frame = repo.latest_prices()
+    instruments = repo.instruments()
+    rates = fin.fx_rates(price_frame)
+    price_map = fin.latest_price_map(price_frame)
 
     out: dict[str, float] = {}
-    approximated: list[str] = []
-    for row, u in zip(px.itertuples(), px["major"]):
-        if row.currency == "GBP":
-            out[row.fund_id] = float(u)
+    unpriceable: list[str] = []
+    for fund_id in price_map:
+        if fund_id in EXCLUDED:
+            continue
+        gbp = valuation.holding_price_gbp(
+            fund_id, instruments, price_map, rates["USD"], rates)
+        if gbp is None or pd.isna(gbp):
+            unpriceable.append(fund_id)
         else:
-            rate = last_fx.get(row.fund_id)
-            if rate:
-                out[row.fund_id] = float(u) / float(rate)
-                approximated.append(row.fund_id)
-            else:
-                out[row.fund_id] = 0.0
-    return out, approximated
+            out[fund_id] = float(gbp)
+    return out, [], unpriceable
 
 
 # --------------------------------------------------------------------------
@@ -226,19 +202,40 @@ class Position:
     latest_price: float
     realised_events: pd.Series = field(repr=False, default_factory=pd.Series)
 
+    # False when an OPEN position has no usable mark, so unrealised P&L is
+    # unknown rather than zero. Such a position reports realised P&L only and
+    # is left out of basket aggregation. A closed position needs no mark, so it
+    # stays priced=True.
+    priced: bool = True
+
+    # Set when the ledger for this instrument could not be walked (e.g. a sell
+    # with no matching buy). The position is returned with zeros so one bad
+    # ledger cannot take down the whole page.
+    error: str = ""
+
     @property
     def status(self) -> str:
+        if self.error:
+            return "error"
+        if not self.priced:
+            return "unpriced"
         return "closed" if self.qty == 0 else "open"
 
 
 def compute_position(
     trades: pd.DataFrame,
-    latest_price: float,
+    latest_price: float | None,
     asof: pd.Timestamp,
     instrument: str = "",
     name: str = "",
 ) -> Position:
-    """Run weighted-average-cost over one instrument's full ledger."""
+    """Run weighted-average-cost over one instrument's full ledger.
+
+    latest_price may be None, meaning "no mark available". For a position that
+    closed flat this is harmless - unrealised is genuinely zero. For an open
+    position it is not: unrealised is unknown, so the position reports realised
+    P&L only and comes back with priced=False.
+    """
     t = trades.copy()
     # Buys (0) before sells (1) within the same date. See COST METHOD above.
     t["_order"] = (t["qty"] < 0).astype(int)
@@ -287,7 +284,14 @@ def compute_position(
     avg_capital = capital_days / days_deployed if days_deployed else 0.0
     peak_capital = float(daily.max())
 
-    unrealised = qty * latest_price - book
+    # An open position with no mark has unknown unrealised P&L. Report realised
+    # only and flag it, rather than marking the position to zero - which would
+    # show the entire book cost as a loss.
+    priced = bool(qty == 0 or latest_price is not None)
+    if priced:
+        unrealised = qty * (latest_price or 0.0) - book
+    else:
+        unrealised = 0.0
     total_pnl = realised + unrealised
 
     return Position(
@@ -306,29 +310,57 @@ def compute_position(
         peak_capital=peak_capital,
         roce_total=total_pnl / avg_capital if avg_capital else 0.0,
         roce_annualised=365 * total_pnl / capital_days if capital_days else 0.0,
-        latest_price=latest_price,
-        realised_events=pd.Series(dict(realised_events)) if realised_events else pd.Series(dtype=float),
+        latest_price=float(latest_price) if latest_price is not None else 0.0,
+        # Built from the list, not dict(...): two sells on the same date are two
+        # events, and dict() would keep only the last one.
+        realised_events=(
+            pd.Series([v for _, v in realised_events],
+                      index=pd.to_datetime([d for d, _ in realised_events]))
+            if realised_events else pd.Series(dtype=float)
+        ),
+        priced=priced,
     )
 
 
 def compute_all(asof: pd.Timestamp | None = None) -> list[Position]:
     """Run the engine over every instrument in the ledger."""
     trades = load_trades()
-    prices, _approx = load_latest_prices()
+    prices, _approx, _unpriceable = load_latest_prices()
     asof = pd.Timestamp(asof or pd.Timestamp.today().normalize())
 
     out = []
     for instrument, grp in trades.groupby("instrument", sort=False):
-        out.append(
-            compute_position(
-                grp,
-                latest_price=prices.get(instrument, 0.0),
-                asof=asof,
-                instrument=instrument,
-                name=grp["name"].iloc[-1],
+        name = grp["name"].iloc[-1]
+        try:
+            out.append(
+                compute_position(
+                    grp,
+                    # .get returns None for an instrument with no usable mark.
+                    # That is the point: None means "unknown", 0.0 would mean
+                    # "worthless".
+                    latest_price=prices.get(instrument),
+                    asof=asof,
+                    instrument=instrument,
+                    name=name,
+                )
             )
-        )
+        except ValueError as exc:
+            # A broken ledger for one instrument must not take down the page.
+            # Surface it as a row the user can see and fix.
+            out.append(_error_position(instrument, name, str(exc)))
     return sorted(out, key=lambda p: p.capital_days, reverse=True)
+
+
+def _error_position(instrument: str, name: str, message: str) -> Position:
+    """A zeroed placeholder carrying the reason the ledger could not be walked."""
+    return Position(
+        instrument=instrument, name=name, qty=0.0, book_cost=0.0, wac=0.0,
+        realised=0.0, unrealised=0.0, total_pnl=0.0,
+        daily_book=pd.Series(dtype=float),
+        capital_days=0.0, days_deployed=0, avg_capital=0.0, peak_capital=0.0,
+        roce_total=0.0, roce_annualised=0.0, latest_price=0.0,
+        priced=False, error=message,
+    )
 
 
 @dataclass
@@ -344,10 +376,20 @@ class Basket:
     roce_total: float
     roce_annualised: float
     members: list[Position]
+    # Positions left out because they have no mark or a broken ledger. The page
+    # should show this count: a silently smaller basket is worse than a warning.
+    excluded: list[Position] = field(default_factory=list)
 
 
 def aggregate(members: list[Position]) -> Basket | None:
-    """Pool the daily series first, then compute once. Never average rates."""
+    """Pool the daily series first, then compute once. Never average rates.
+
+    Members with no mark (priced=False) or a ledger error are excluded, because
+    their total P&L is unknown and folding a partial figure into the basket
+    would understate the rate without saying so.
+    """
+    excluded = [p for p in members if not p.priced or p.error]
+    members = [p for p in members if p.priced and not p.error]
     if not members:
         return None
 
@@ -375,6 +417,7 @@ def aggregate(members: list[Position]) -> Basket | None:
         roce_total=total_pnl / avg_capital if avg_capital else 0.0,
         roce_annualised=365 * total_pnl / capital_days if capital_days else 0.0,
         members=members,
+        excluded=excluded,
     )
 
 
@@ -391,9 +434,14 @@ MIN_DAYS_TO_ANNUALISE = 180
 def validate(members: list[Position], basket: Basket, trades: pd.DataFrame) -> list[tuple[str, bool, str]]:
     checks: list[tuple[str, bool, str]] = []
 
+    # Reconcile only what the basket actually contains. Unpriced and errored
+    # positions are reported separately in check 4 rather than failing check 1,
+    # which would be a true statement about the wrong population.
+    priced = basket.members
+
     # 1. total P&L == market value of what's left + net cash flow, per instrument
     worst = 0.0
-    for p in members:
+    for p in priced:
         net_cash = float(trades.loc[trades["instrument"] == p.instrument, "cash_flow"].sum())
         expected = p.qty * p.latest_price + net_cash
         worst = max(worst, abs(expected - p.total_pnl))
@@ -404,7 +452,7 @@ def validate(members: list[Position], basket: Basket, trades: pd.DataFrame) -> l
     ))
 
     # 2. capital-days are additive across instruments
-    summed = sum(p.capital_days for p in members)
+    summed = sum(p.capital_days for p in priced)
     diff = abs(summed - basket.capital_days)
     checks.append((
         "Capital-days additive",
@@ -412,15 +460,39 @@ def validate(members: list[Position], basket: Basket, trades: pd.DataFrame) -> l
         f"£{summed:,.0f} vs £{basket.capital_days:,.0f}",
     ))
 
-    # 3. total and annualised tie, and the contribution weights reproduce the rate
+    # 3. total and annualised tie, and the contribution weights reproduce the rate.
+    # The identity only holds if every member carrying P&L also carries
+    # capital-days; check 5 is what tells you when it does not.
     weighted = sum(
-        (p.capital_days / basket.capital_days) * p.roce_annualised for p in members
+        (p.capital_days / basket.capital_days) * p.roce_annualised for p in priced
     ) if basket.capital_days else 0.0
     diff3 = abs(weighted - basket.roce_annualised)
     checks.append((
         "Contributions reproduce basket rate",
         diff3 < 1e-9,
         f"{weighted:.6%} vs {basket.roce_annualised:.6%}",
+    ))
+
+    # 4. every position made it into the basket
+    bad = basket.excluded
+    checks.append((
+        "All positions priced and walkable",
+        not bad,
+        "all included" if not bad else
+        f"{len(bad)} excluded: " + ", ".join(
+            f"{p.instrument} ({p.error or 'no mark'})" for p in bad[:5]
+        ),
+    ))
+
+    # 5. same-day round trips carry P&L but no capital-days, which breaks the
+    # contribution identity in check 3. Name them rather than let check 3 fail
+    # with no explanation.
+    flat = [p for p in priced if p.capital_days == 0 and abs(p.total_pnl) > 0.01]
+    checks.append((
+        "No P&L without capital employed",
+        not flat,
+        "none" if not flat else
+        f"{len(flat)} same-day: " + ", ".join(p.instrument for p in flat[:5]),
     ))
 
     return checks

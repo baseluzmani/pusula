@@ -49,6 +49,12 @@ PAGE = {
     "margin": "0 auto",
 }
 
+PAGE_TIGHT = {
+    "padding": "10px",
+    "maxWidth": "1600px",
+    "margin": "0 auto",
+}
+
 H1 = {
     "fontSize": "20px",
     "fontWeight": 600,

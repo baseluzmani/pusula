@@ -58,11 +58,24 @@ def render():
                   "marginBottom": "12px"}),
 
         html.Div([
-            html.Div(html.Div(id="pf-holdings"),
-                     style={**theme.CARD, "flex": "1", "minWidth": 0,
-                            "padding": "0", "marginRight": "12px",
-                            "overflow": "auto",
-                            "maxHeight": "calc(100vh - 210px)"}),
+            # LEFT BOX (Main Table)
+            html.Div([
+                html.Div("Holdings Detail", style=theme.CARD_TITLE),
+                html.Div(id="pf-holdings")
+            ], style={
+                **theme.CARD, 
+                
+                # Your updated width preference
+                "flex": "1 1 750px",  
+                "minWidth": "300px",  
+                "overflow": "auto",
+                # NEW: Prevent vertical squishing in mobile landscape mode
+                "minHeight": "400px",                 
+                # Keep the upper limit for desktop views
+                "maxHeight": "calc(100vh - 210px)"
+            }),
+            
+            # RIGHT BOX (Özet Paneller)
             html.Div([
                 html.Div([
                     html.Div("By category", style=theme.CARD_TITLE),
@@ -76,9 +89,16 @@ def render():
                     html.Div("By account", style=theme.CARD_TITLE),
                     html.Div(id="pf-by-account"),
                 ], style={**theme.CARD, "marginTop": "12px"}),
-            ], style={"flexShrink": "0", "width": "380px",
-                      "overflowY": "auto", "maxHeight": "calc(100vh - 210px)"}),
-        ], style={"display": "flex", "alignItems": "flex-start"}),
+            ], style={"flex": "1 1 380px", # 380px'i ideal boyut yap ama esnemesine izin ver
+                      "maxWidth": "100%",  # Mobilde ekranın %100'ünü geçmesin
+                      "overflowY": "auto", 
+                      "maxHeight": "calc(100vh - 210px)"}),
+                      
+        # ANA ÇERÇEVE (Sihrin Gerçekleştiği Yer)
+        ], style={"display": "flex", 
+                  "flexWrap": "wrap", # YER KALMAZSA ALT SATIRA GEÇ!
+                  "gap": "12px",      # İki kutunun (yan yana veya alt alta) arasına 12px boşluk koy
+                  "alignItems": "flex-start"}),
     ])
 
 

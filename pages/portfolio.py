@@ -9,6 +9,8 @@ against the legacy engine.
 import dash
 from dash import html, dcc, callback, Input, Output
 
+from core import theme
+
 from pages import (portfolio_holdings, portfolio_pnl, pnl_analysis, portfolio_txns,
                    portfolio_accounts, portfolio_charts, portfolio_summary, portfolio_inputs)
 
@@ -20,7 +22,6 @@ TABS = {
     "P&L ROCI": pnl_analysis.render,
     "Transactions": portfolio_txns.render,
     "Accounts": portfolio_accounts.render,
-    "Portfolio": portfolio_holdings.render,
     "Charts": portfolio_charts.render,
     "Summary": portfolio_summary.render,
     "Inputs": portfolio_inputs.render,
@@ -34,7 +35,7 @@ def layout():
                  children=[dcc.Tab(label=n, value=n) for n in names],
                  style={"marginBottom": "14px"}),
         html.Div(id="pf-body"),
-    ], style={"maxWidth": "1600px", "margin": "0 auto", "padding": "18px"})
+    ], style=theme.PAGE_TIGHT)
 
 
 @callback(Output("pf-body", "children"), Input("pf-tabs", "value"))

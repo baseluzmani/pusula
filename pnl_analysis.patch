@@ -1,0 +1,25 @@
+diff --git a/pages/pnl_analysis.py b/pages/pnl_analysis.py
+index 3d07926..95b6b28 100644
+--- a/pages/pnl_analysis.py
++++ b/pages/pnl_analysis.py
+@@ -42,7 +42,7 @@ def get_data(force: bool = False) -> dict:
+     if force or not _CACHE:
+         trades = load_trades()
+         members = compute_all()
+-        _, approx = load_latest_prices()
++        _, approx, unpriceable = load_latest_prices()
+         _CACHE.clear()
+         _CACHE.update(
+             trades=trades,
+@@ -51,7 +51,11 @@ def get_data(force: bool = False) -> dict:
+             by_id={p.instrument: p for p in members},
+             asof=pd.Timestamp.today().normalize(),
+             approx=approx,
++            unpriceable=unpriceable,
+             n_closed=sum(1 for p in members if p.status == "closed"),
++            # Open positions with no mark, or ledgers that failed to walk.
++            # These report realised P&L only and are left out of the basket.
++            n_unpriced=sum(1 for p in members if not p.priced),
+         )
+     return _CACHE
+ 

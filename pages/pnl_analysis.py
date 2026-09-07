@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html
 from dash.dash_table.Format import Format, Group, Scheme
 
+from core import db
 from core.roce import (
     MIN_DAYS_TO_ANNUALISE,
     Position,
@@ -37,12 +38,54 @@ PREFIX = "basket-"
 _CACHE: dict = {}
 
 
+def _data_stamp() -> str:
+    """Fingerprint of everything the engine reads: prices and the ledger.
+
+    MAX(id) catches inserted transactions, COUNT(*) catches deleted ones, and
+    MAX(date) catches new prices. All three are indexed, so this stays cheap
+    enough to run on every render.
+
+    It cannot see an in-place edit - correcting an fx_rate on an existing row
+    changes neither the max id nor the count - which is why the Refresh button
+    stays.
+    """
+    df = db.query("""
+        SELECT (SELECT MAX(date) FROM prices)       AS px,
+               (SELECT MAX(id)   FROM transactions) AS txn,
+               (SELECT COUNT(*)  FROM transactions) AS n
+    """)
+    r = df.iloc[0]
+    return f"{r['px']}|{r['txn']}|{r['n']}"
+
+
 def get_data(force: bool = False) -> dict:
-    """Cached engine run. Returns {'members', 'trades', 'rows', 'by_id', 'asof'}."""
-    if force or not _CACHE:
+    """Cached engine run, refilled whenever new prices land.
+
+    Returns {'trades', 'members', 'rows', 'by_id', 'asof', 'approx',
+    'unpriceable', 'n_closed', 'n_unpriced', 'price_stamp'}.
+
+    The engine walks the full ledger and rebuilds a daily book-cost series per
+    instrument, so it is far too expensive to run on every callback - hence the
+    cache. But the cache previously had no expiry: it filled on the first
+    render after the process started and never refilled, while live_prices
+    wrote new rows every 15 minutes. The P&L tab recomputes per render, so the
+    two tabs drifted apart by however far prices had moved since this page was
+    first opened.
+
+    Keying on the latest price date fixes that without reintroducing the cost:
+    the stamp query is trivial, and a miss only happens when there is genuinely
+    something new to show.
+
+    Note this is a module-level dict, which is safe only because the service
+    runs gunicorn with --workers 1. With more workers each would hold its own
+    cache and the page could show different numbers on alternate refreshes;
+    move to Flask-Caching with a shared backend before raising that.
+    """
+    stamp = _data_stamp()
+    if force or not _CACHE or _CACHE.get("data_stamp") != stamp:
         trades = load_trades()
         members = compute_all()
-        _, approx = load_latest_prices()
+        _, approx, unpriceable = load_latest_prices()
         _CACHE.clear()
         _CACHE.update(
             trades=trades,
@@ -51,7 +94,13 @@ def get_data(force: bool = False) -> dict:
             by_id={p.instrument: p for p in members},
             asof=pd.Timestamp.today().normalize(),
             approx=approx,
+            unpriceable=unpriceable,
             n_closed=sum(1 for p in members if p.status == "closed"),
+            # Open positions with no mark, or ledgers that failed to walk.
+            # These report realised P&L only and are left out of the basket.
+            n_unpriced=sum(1 for p in members if not p.priced),
+            # What this snapshot was built from. Compared on the next call.
+            data_stamp=stamp,
         )
     return _CACHE
 
