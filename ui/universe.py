@@ -23,22 +23,30 @@ from core.repo import market as repo
 
 
 STORE_ID = "markets-universe"
+PROMPT = "Choose a universe above to load the data."
 
 
 def resolve_ids(store: dict) -> list:
     """Concrete fund ids for the current universe selection."""
     store = store or {}
-    mode = store.get("mode", "holdings")
+    mode = store.get("mode")
     if mode == "all":
         return repo.all_instrument_ids()
     if mode == "select":
         return list(store.get("picked") or [])
-    return repo.open_position_ids()
+    if mode == "holdings":
+        return repo.open_position_ids()
+    return []          # nothing chosen yet: load nothing
+
+
+def is_chosen(store) -> bool:
+    """False until the user clicks one of the universe options."""
+    return bool((store or {}).get("mode"))
 
 
 def default_store() -> dict:
-    """First-load universe: My holdings."""
-    return {"mode": "holdings", "picked": []}
+    """First-load state: no universe chosen, so no data is loaded."""
+    return {"mode": None, "picked": []}
 
 
 def selector_bar():
@@ -175,6 +183,8 @@ def _fill_picker(mode, search, _all, _none, current, store):
     State("markets-picker", "options"),
 )
 def _write_store(mode, picked, options):
+    if mode is None:
+        return default_store(), "Choose a universe to load data"
     if mode == "select":
         # picked holds only currently-visible ticks; merge with any ticked
         # rows filtered out by an active search is handled in _fill_picker,

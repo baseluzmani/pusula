@@ -232,3 +232,19 @@ select {
 .ind-dark .DateInput {
   border-radius: 2px;
 }
+
+/* Compare: ticked rows. Toggled in place by the _mark callback in
+   pages/compare.py, so ticking never rebuilds the table. */
+.cmp-picked {
+  background: #EEF4FB;
+}
+
+.cmp-picked td:first-child {
+  font-weight: 600;
+}
+
+.cmp-picked td:first-child>div::before {
+  content: "\25CF ";
+  color: #B8860F;
+  font-size: 8px;
+}

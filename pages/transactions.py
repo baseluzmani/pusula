@@ -109,6 +109,8 @@ def _table(store, since, _sorts, selected, sort):
         sort = ({"col": col, "asc": not sort["asc"]}
                 if sort["col"] == col else {"col": col, "asc": False})
 
+    if not universe.is_chosen(store):
+        return _empty(universe.PROMPT), sort
     ids = universe.resolve_ids(store)
     if not ids:
         return _empty("No instruments in this universe."), sort

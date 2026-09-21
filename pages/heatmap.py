@@ -79,7 +79,8 @@ def _grid(store, sort_col, group, since):
     since = since or settings.get("MARKETS_SINCE_DEFAULT", "2026-03-01")
     sort_col = sort_col if sort_col in HEAT_COLS else "YTD"
     grouped = "on" in (group or [])
-
+    if not universe.is_chosen(store):
+        return _empty(universe.PROMPT)
     ids = universe.resolve_ids(store)
     if not ids:
         return _empty("No instruments in this universe.")
