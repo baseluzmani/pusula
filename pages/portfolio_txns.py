@@ -168,7 +168,11 @@ def _row(t, instruments, price_map, gbpusd, rates, totals):
     curr = inst.get("currency", t["currency"] or "GBP")
     punit = inst.get("price_unit", t["price_unit"] or "pound")
 
-    cost_per_unit = fin.txn_price_to_gbp(price, t["currency"], fx, punit)
+    # A dividend stores its cash amount in `quantity` and pins price at 1.0, so
+    # that price is a placeholder, not a quote - never read it as pence.
+    is_div = ttype == "DIVIDEND"
+    cost_per_unit = fin.txn_price_to_gbp(
+        price, t["currency"], fx, "pound" if is_div else punit)
     comm = fin.commission_to_gbp(t.get("commission", 0.0), t["currency"], fx)
 
     latest_str, latest_gbp = _latest(fid, instruments, price_map, gbpusd,
@@ -200,7 +204,8 @@ def _row(t, instruments, price_map, gbpusd, rates, totals):
         _td(ttype, colour=TYPE_COLOURS.get(ttype, theme.TEXT), weight=600,
             mono=False),
         _td(_fmt_qty(signed_qty), colour=theme.SLATE),
-        _td(_native(price, punit, curr), colour=theme.SLATE),
+        _td("\u2014" if is_div else _native(price, punit, curr),
+            colour=theme.SLATE),
         _td(_fmt_signed(signed_cost), colour=cost_col, weight=600),
         _td(f"{comm:,.2f}" if comm else "\u2014", colour=theme.NEUTRAL),
         _td(latest_str, colour=theme.SLATE),

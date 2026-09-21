@@ -119,9 +119,26 @@ def _transaction_form():
 def _recent_panel():
     return html.Div([
         html.Div("Recent transactions", style=theme.CARD_TITLE),
-        html.Div("Click a row to edit it.",
+        html.Div("Click a row to edit it. Shows the latest 30, or up to 200 "
+                 "once a filter is set.",
                  style={"fontSize": "11.5px", "color": theme.NEUTRAL,
                         "marginBottom": "8px"}),
+        html.Div([
+            _field("Fund", dcc.Dropdown(
+                id="in-f-fund", options=_fund_options(),
+                placeholder="All funds", style={"fontSize": "12px"}), "260px"),
+            _field("Account", dcc.Dropdown(
+                id="in-f-account",
+                options=standing.account_options(active_only=False),
+                placeholder="All accounts",
+                style={"fontSize": "12px"}), "170px"),
+            _field("Type", dcc.Dropdown(
+                id="in-f-type", options=[{"label": t.title(), "value": t}
+                                         for t in TYPES],
+                placeholder="All types",
+                style={"fontSize": "12px"}), "130px"),
+        ], style={"display": "flex", "flexWrap": "wrap", "gap": "10px",
+                  "alignItems": "flex-end", "marginBottom": "10px"}),
         # Built at layout time rather than left for a callback to fill. A
         # panel that starts empty is indistinguishable from a broken one.
         html.Div(id="in-recent", children=_recent_table(None),
@@ -301,15 +318,20 @@ def _save(_n, editing, fund_id, account, trade_date, ttype, qty, price,
 # --- recent list, selection, delete ---------------------------------------
 
 @callback(Output("in-recent", "children"),
-          Input("in-refresh", "data"), Input("in-editing", "data"))
-def _recent(_refresh, editing):
-    return _recent_table(editing)
+          Input("in-refresh", "data"), Input("in-editing", "data"),
+          Input("in-f-fund", "value"), Input("in-f-account", "value"),
+          Input("in-f-type", "value"))
+def _recent(_refresh, editing, fund, account, ttype):
+    return _recent_table(editing, fund, account, ttype)
 
 
-def _recent_table(editing):
-    df = repo.recent_transactions(30)
+def _recent_table(editing, fund=None, account=None, ttype=None):
+    filtered = bool(fund or account or ttype)
+    df = repo.recent_transactions(200 if filtered else 30,
+                                  fund_id=fund, account=account, ttype=ttype)
     if df.empty:
-        return html.P("No transactions yet.",
+        return html.P("No transactions match these filters." if filtered
+                      else "No transactions yet.",
                       style={"color": theme.NEUTRAL, "fontSize": "12px"})
 
     head = html.Thead(html.Tr([

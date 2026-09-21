@@ -103,16 +103,34 @@ def default_commission(currency: str) -> float:
 
 # --- Transactions ---------------------------------------------------------
 
-def recent_transactions(limit: int = 30) -> pd.DataFrame:
-    df = db.query("""
+def recent_transactions(limit: int = 30, fund_id: str | None = None,
+                        account: str | None = None,
+                        ttype: str | None = None) -> pd.DataFrame:
+    # Each filter adds one WHERE clause with a ? placeholder. The clause text
+    # is fixed here; the values travel separately in `params`, so nothing the
+    # user picked is ever spliced into the SQL string.
+    clauses, params = [], []
+    if fund_id:
+        clauses.append("t.fund_id = ?")
+        params.append(fund_id)
+    if account:
+        clauses.append("t.account = ?")
+        params.append(account)
+    if ttype:
+        clauses.append("t.type = ?")
+        params.append(ttype)
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+
+    df = db.query(f"""
         SELECT t.id, t.trade_date, t.account, t.fund_id, t.type, t.quantity,
                t.price, t.currency, t.fx_rate,
                COALESCE(t.commission, 0) AS commission,
                COALESCE(i.name, t.fund_id) AS name, i.price_unit
         FROM transactions t
         LEFT JOIN instruments i ON i.fund_id = t.fund_id
+        {where}
         ORDER BY t.trade_date DESC, t.id DESC LIMIT ?
-    """, (limit,))
+    """, (*params, limit))
     if not df.empty:
         df["trade_date"] = pd.to_datetime(df["trade_date"])
     return df
