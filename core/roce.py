@@ -43,6 +43,11 @@ Weighted average cost. Within a single date, buys are processed before sells.
 That is deterministic and it avoids a transient short position on same-day
 round trips (e.g. the 2026-06-25 buy 1,000 / sell 2,000 pair in wheat).
 
+Dividends are booked to realised P&L, not netted off book cost. Both give the
+same total P&L, but cost-reduction shrinks the ROCE denominator and can turn
+it negative on a long-held income position, which would flip the sign of a
+profitable holding.
+
 The engine always runs over the FULL ledger. There is no date filter on this
 page by design: a windowed ROCE needs an opening and closing mark, and the
 unrealised P&L at a window start is not zero. That is a separate problem.
@@ -105,36 +110,65 @@ TRADES_SQL = """
            LOWER(COALESCE(i.price_unit, ''))     AS price_unit
     FROM transactions t
     LEFT JOIN instruments i ON i.fund_id = t.fund_id
-    WHERE UPPER(t.type) IN ('BUY', 'SELL')
+    WHERE UPPER(t.type) IN ('BUY', 'SELL', 'DIVIDEND')
     ORDER BY t.trade_date, t.id
 """
 
 
 def load_trades() -> pd.DataFrame:
-    """Full trade ledger, with a signed GBP cash_flow including commission.
+    """Full ledger, with a signed GBP cash_flow including commission.
 
-    Returns columns: date, instrument, name, qty (signed), cash_flow (signed:
-    negative on a buy, positive on a sell).
+    Returns columns: date, instrument, name, type, qty (signed, always 0 for
+    DIVIDEND), cash_flow (signed: negative on a buy, positive on a sell or a
+    dividend).
+
+    DIVIDEND rows carry the cash amount in raw_qty with price pinned to 1.0
+    by add_transaction - the same convention core.finance.position_pnl
+    relies on. They never move qty; compute_position() applies them to book
+    cost only, not the share count.
     """
     df = db.query(TRADES_SQL)
 
     df = df[~df["instrument"].isin(EXCLUDED)].copy()
     df["date"] = pd.to_datetime(df["date"])
+    is_div = df["type"] == "DIVIDEND"
 
     df["qty"] = df["raw_qty"].where(df["type"] == "BUY", -df["raw_qty"])
+    df.loc[is_div, "qty"] = 0.0
 
-    # Pence/cents -> major units.
+    # Pence/cents -> major units. A dividend's cash amount is always entered
+    # in major units regardless of how the instrument itself is quoted, so
+    # the pence conversion is skipped for DIVIDEND rows (mirrors
+    # core.finance.position_pnl, which forces price_unit="pound" for these).
     unit = df["price_unit"].str.strip().isin(MINOR_UNITS).map({True: 100.0, False: 1.0})
+    unit = unit.where(~is_div, 1.0)
     fx = df["fx_rate"].replace(0, 1.0).fillna(1.0)
 
-    gross_gbp = df["qty"].abs() * df["price"] / unit / fx
+    gross_gbp = df["raw_qty"].abs() * df["price"] / unit / fx
     comm_gbp = df["commission"] / (fx if COMMISSION_IN_TRADE_CCY else 1.0)
 
+    # qty > 0 is a buy (cash out). DIVIDEND rows have qty == 0, so they fall
+    # into the same branch as a sell: cash in, which is what a dividend is.
     df["cash_flow"] = (-(gross_gbp + comm_gbp)).where(df["qty"] > 0, gross_gbp - comm_gbp)
 
-    return df[["date", "instrument", "name", "qty", "cash_flow"]].dropna(
-        subset=["qty", "cash_flow"]
+    # Same cash flow, but never divided by fx_rate - what the trade (or
+    # dividend) actually cost/raised in its own currency. Used only for the
+    # fx_pnl column: a second WAC walk over these, in compute_position,
+    # isolates the local (currency-neutral) return so FX can be read off as
+    # the residual against the GBP total_pnl above. Mirrors gross_gbp exactly
+    # - raw_qty (not qty) so DIVIDEND rows, which have qty==0, still carry
+    # their amount through; reuses the same is_div-adjusted `unit`.
+    # gross_gbp/comm_gbp above are untouched.
+    gross_native = df["raw_qty"].abs() * df["price"] / unit
+    comm_native = df["commission"] if COMMISSION_IN_TRADE_CCY else df["commission"] * fx
+    df["cash_flow_native"] = (-(gross_native + comm_native)).where(
+        df["qty"] > 0, gross_native - comm_native
     )
+
+    return df[
+        ["date", "instrument", "name", "type", "qty", "cash_flow",
+         "cash_flow_native", "currency"]
+    ].dropna(subset=["qty", "cash_flow"])
 
 
 def load_latest_prices() -> tuple[dict[str, float], list[str], list[str]]:
@@ -213,6 +247,19 @@ class Position:
     # ledger cannot take down the whole page.
     error: str = ""
 
+    # Trade currency, as recorded on the ledger. "GBP" for every column above
+    # except fx_pnl, which is exactly 0.0 for GBP positions.
+    currency: str = "GBP"
+
+    # GBP P&L attributable to currency movement, isolated by re-running the
+    # same WAC walk (dividends included, exactly as the main walk treats them
+    # - booked straight to realised, no book-cost reduction) in the
+    # instrument's own currency, then converting that local return to GBP at
+    # TODAY's rate. Whatever total_pnl contains beyond that
+    # local-return-at-today's-rate is, by construction, the FX effect. Does
+    # not change realised/unrealised/total_pnl/roce_* above.
+    fx_pnl: float = 0.0
+
     @property
     def status(self) -> str:
         if self.error:
@@ -228,6 +275,10 @@ def compute_position(
     asof: pd.Timestamp,
     instrument: str = "",
     name: str = "",
+    *,
+    currency: str = "GBP",
+    native_latest_price: float | None = None,
+    fx_now: float = 1.0,
 ) -> Position:
     """Run weighted-average-cost over one instrument's full ledger.
 
@@ -235,6 +286,10 @@ def compute_position(
     closed flat this is harmless - unrealised is genuinely zero. For an open
     position it is not: unrealised is unknown, so the position reports realised
     P&L only and comes back with priced=False.
+
+    currency/native_latest_price/fx_now are only used to compute fx_pnl and
+    default to values that make it exactly 0.0 - existing callers that don't
+    pass them (tests, why_disagree.py) are unaffected.
     """
     t = trades.copy()
     # Buys (0) before sells (1) within the same date. See COST METHOD above.
@@ -266,6 +321,14 @@ def compute_position(
 
             realised_events.append((row.date, row.cash_flow - released))
 
+        else:
+            # Dividend: cash in, position unchanged. Booked to realised rather
+            # than netted off book cost, so avg cost keeps meaning what it says
+            # and a long-held income position cannot drive its own book cost -
+            # and therefore its ROCE denominator - negative.
+            realised += row.cash_flow
+            realised_events.append((row.date, row.cash_flow))
+
         # Snap float dust to zero so a flat position reads as genuinely flat.
         if abs(qty) < 1e-9:
             qty = book = 0.0
@@ -294,6 +357,39 @@ def compute_position(
         unrealised = 0.0
     total_pnl = realised + unrealised
 
+    # FX P&L: identical walk - dividend branch included, treated exactly the
+    # same way as the main walk above (booked to realised, book cost
+    # untouched) - run again on the native (non-FX-converted) cash flows,
+    # giving local_pnl in the instrument's own currency. Converting that at
+    # TODAY's rate - not the historic per-trade rates used for book/realised
+    # above - and comparing to total_pnl isolates the currency effect as a
+    # residual. GBP positions skip this: fx_pnl is exactly 0.0, not a
+    # rounding artefact of walking the same numbers twice.
+    if currency == "GBP" or "cash_flow_native" not in t.columns:
+        fx_pnl = 0.0
+    else:
+        nqty = nbook = nrealised = 0.0
+        for row in t.itertuples():
+            if row.qty > 0:
+                nbook += -row.cash_flow_native
+                nqty += row.qty
+            elif row.qty < 0:
+                nsell_qty = -row.qty
+                nwac = nbook / nqty if nqty else 0.0
+                nreleased = nsell_qty * nwac
+                nrealised += row.cash_flow_native - nreleased
+                nbook -= nreleased
+                nqty -= nsell_qty
+            else:
+                # Dividend, mirroring the main walk's else branch exactly:
+                # cash in, book cost untouched.
+                nrealised += row.cash_flow_native
+            if abs(nqty) < 1e-9:
+                nqty = nbook = 0.0
+        nunrealised = (nqty * (native_latest_price or 0.0) - nbook) if priced else 0.0
+        local_pnl_gbp = (nrealised + nunrealised) / fx_now if fx_now else 0.0
+        fx_pnl = total_pnl - local_pnl_gbp
+
     return Position(
         instrument=instrument,
         name=name,
@@ -311,6 +407,8 @@ def compute_position(
         roce_total=total_pnl / avg_capital if avg_capital else 0.0,
         roce_annualised=365 * total_pnl / capital_days if capital_days else 0.0,
         latest_price=float(latest_price) if latest_price is not None else 0.0,
+        currency=currency,
+        fx_pnl=fx_pnl,
         # Built from the list, not dict(...): two sells on the same date are two
         # events, and dict() would keep only the last one.
         realised_events=(
@@ -322,15 +420,38 @@ def compute_position(
     )
 
 
+def _native_fx_context() -> tuple[dict[str, float], dict[str, float]]:
+    """Native latest price (major units, no FX) per instrument, and current
+    FX rates per currency code. Used only for fx_pnl - the GBP marks from
+    load_latest_prices() are untouched. Re-reads latest_prices()/instruments()
+    rather than extending load_latest_prices()'s return shape, which three
+    test call sites and the page unpack as an exact 3-tuple.
+    """
+    price_frame = repo.latest_prices()
+    instruments = repo.instruments()
+    rates = fin.fx_rates(price_frame)
+    price_map = fin.latest_price_map(price_frame)
+
+    native_prices: dict[str, float] = {}
+    for fund_id, raw in price_map.items():
+        punit = str(instruments.get(fund_id, {}).get("price_unit", "")).strip().lower()
+        unit = 100.0 if punit in MINOR_UNITS else 1.0
+        native_prices[fund_id] = raw / unit
+
+    return native_prices, rates
+
+
 def compute_all(asof: pd.Timestamp | None = None) -> list[Position]:
     """Run the engine over every instrument in the ledger."""
     trades = load_trades()
     prices, _approx, _unpriceable = load_latest_prices()
+    native_prices, fx_rates_now = _native_fx_context()
     asof = pd.Timestamp(asof or pd.Timestamp.today().normalize())
 
     out = []
     for instrument, grp in trades.groupby("instrument", sort=False):
         name = grp["name"].iloc[-1]
+        currency = grp["currency"].iloc[-1]
         try:
             out.append(
                 compute_position(
@@ -342,6 +463,9 @@ def compute_all(asof: pd.Timestamp | None = None) -> list[Position]:
                     asof=asof,
                     instrument=instrument,
                     name=name,
+                    currency=currency,
+                    native_latest_price=native_prices.get(instrument),
+                    fx_now=fx_rates_now.get(currency, 1.0),
                 )
             )
         except ValueError as exc:
@@ -379,6 +503,7 @@ class Basket:
     # Positions left out because they have no mark or a broken ledger. The page
     # should show this count: a silently smaller basket is worse than a warning.
     excluded: list[Position] = field(default_factory=list)
+    fx_pnl: float = 0.0
 
 
 def aggregate(members: list[Position]) -> Basket | None:
@@ -418,6 +543,7 @@ def aggregate(members: list[Position]) -> Basket | None:
         roce_annualised=365 * total_pnl / capital_days if capital_days else 0.0,
         members=members,
         excluded=excluded,
+        fx_pnl=sum(p.fx_pnl for p in members),
     )
 
 
@@ -495,4 +621,30 @@ def validate(members: list[Position], basket: Basket, trades: pd.DataFrame) -> l
         f"{len(flat)} same-day: " + ", ".join(p.instrument for p in flat[:5]),
     ))
 
+    # 6. FX P&L. total_pnl == local_return + fx_pnl is not checked here: fx_pnl
+    # is defined as that residual, so the identity can never disagree with
+    # itself. What can actually go wrong is a currency-matching bug leaking a
+    # stray fx_pnl into a GBP row, or aggregate() dropping the field - so
+    # those are what this checks.
+    bad_gbp = [p for p in priced if p.currency == "GBP" and abs(p.fx_pnl) > 0.01]
+    fx_summed = sum(p.fx_pnl for p in priced)
+    fx_diff = abs(fx_summed - basket.fx_pnl)
+    checks.append((
+        "FX P&L zero for GBP, additive across basket",
+        not bad_gbp and fx_diff < 0.01,
+        (f"{len(bad_gbp)} GBP position(s) with nonzero FX P&L; " if bad_gbp else "")
+        + f"£{fx_summed:,.2f} vs £{basket.fx_pnl:,.2f}",
+    ))
+
     return checks
+
+
+def roce_map(asof: pd.Timestamp | None = None) -> dict[str, Position]:
+    """{fund_id: Position} for every instrument in the ledger.
+
+    Convenience wrapper for pages that want ROCE alongside their own figures.
+    Recomputed on every call, deliberately uncached, so a transaction entered
+    a moment ago shows up on the next render. See the note in
+    pages/pnl_analysis.get_data for why nothing here memoises.
+    """
+    return {p.instrument: p for p in compute_all(asof)}

@@ -21,7 +21,6 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html
 from dash.dash_table.Format import Format, Group, Scheme
 
-from core import db
 from core.roce import (
     MIN_DAYS_TO_ANNUALISE,
     Position,
@@ -35,74 +34,47 @@ from core.roce import (
 
 PREFIX = "basket-"
 
-_CACHE: dict = {}
-
-
-def _data_stamp() -> str:
-    """Fingerprint of everything the engine reads: prices and the ledger.
-
-    MAX(id) catches inserted transactions, COUNT(*) catches deleted ones, and
-    MAX(date) catches new prices. All three are indexed, so this stays cheap
-    enough to run on every render.
-
-    It cannot see an in-place edit - correcting an fx_rate on an existing row
-    changes neither the max id nor the count - which is why the Refresh button
-    stays.
-    """
-    df = db.query("""
-        SELECT (SELECT MAX(date) FROM prices)       AS px,
-               (SELECT MAX(id)   FROM transactions) AS txn,
-               (SELECT COUNT(*)  FROM transactions) AS n
-    """)
-    r = df.iloc[0]
-    return f"{r['px']}|{r['txn']}|{r['n']}"
-
-
-def get_data(force: bool = False) -> dict:
-    """Cached engine run, refilled whenever new prices land.
+def get_data() -> dict:
+    """Run the engine and return everything the page needs.
 
     Returns {'trades', 'members', 'rows', 'by_id', 'asof', 'approx',
-    'unpriceable', 'n_closed', 'n_unpriced', 'price_stamp'}.
+    'unpriceable', 'n_closed', 'n_unpriced'}.
 
-    The engine walks the full ledger and rebuilds a daily book-cost series per
-    instrument, so it is far too expensive to run on every callback - hence the
-    cache. But the cache previously had no expiry: it filled on the first
-    render after the process started and never refilled, while live_prices
-    wrote new rows every 15 minutes. The P&L tab recomputes per render, so the
-    two tabs drifted apart by however far prices had moved since this page was
-    first opened.
+    Deliberately uncached. There was a module-level dict here, and it was the
+    source of a bug that took a while to find: it filled on the first render
+    after the process started and never refilled, so this page showed prices
+    from whenever it was first opened while the P&L tab, which recomputes per
+    render, moved with the market. The two tabs disagreed by whatever sterling
+    and the market had done in between, and nothing on screen said so.
 
-    Keying on the latest price date fixes that without reintroducing the cost:
-    the stamp query is trivial, and a miss only happens when there is genuinely
-    something new to show.
+    A stamp-based invalidation fixed the common cases but not in-place edits -
+    a corrected fx_rate or a hand-patched close changes no row count and no max
+    date - so the Refresh button had to stay as an escape hatch, and a button
+    you must remember to press is a worse bug than a slow page.
 
-    Note this is a module-level dict, which is safe only because the service
-    runs gunicorn with --workers 1. With more workers each would hold its own
-    cache and the page could show different numbers on alternate refreshes;
-    move to Flask-Caching with a shared backend before raising that.
+    The whole run is ~130ms: the ledger walk is about 100ms and the rest is two
+    indexed queries. That is cheap enough to pay on every callback in exchange
+    for never having to wonder whether the number on screen is current.
+
+    If this ever becomes slow enough to matter, cache it properly with
+    Flask-Caching and a short TTL rather than reintroducing a dict that nothing
+    invalidates.
     """
-    stamp = _data_stamp()
-    if force or not _CACHE or _CACHE.get("data_stamp") != stamp:
-        trades = load_trades()
-        members = compute_all()
-        _, approx, unpriceable = load_latest_prices()
-        _CACHE.clear()
-        _CACHE.update(
-            trades=trades,
-            members=members,
-            rows=positions_to_rows(members),
-            by_id={p.instrument: p for p in members},
-            asof=pd.Timestamp.today().normalize(),
-            approx=approx,
-            unpriceable=unpriceable,
-            n_closed=sum(1 for p in members if p.status == "closed"),
-            # Open positions with no mark, or ledgers that failed to walk.
-            # These report realised P&L only and are left out of the basket.
-            n_unpriced=sum(1 for p in members if not p.priced),
-            # What this snapshot was built from. Compared on the next call.
-            data_stamp=stamp,
-        )
-    return _CACHE
+    members = compute_all()
+    _, approx, unpriceable = load_latest_prices()
+    return dict(
+        trades=load_trades(),
+        members=members,
+        rows=positions_to_rows(members),
+        by_id={p.instrument: p for p in members},
+        asof=pd.Timestamp.today().normalize(),
+        approx=approx,
+        unpriceable=unpriceable,
+        n_closed=sum(1 for p in members if p.status == "closed"),
+        # Open positions with no mark, or ledgers that failed to walk. These
+        # report realised P&L only and are left out of the basket.
+        n_unpriced=sum(1 for p in members if not p.priced),
+    )
 
 
 # --------------------------------------------------------------------------
@@ -192,6 +164,7 @@ TABLE_STYLE = dict(
         + _money_text("total_pnl")
         + _money_text("realised")
         + _money_text("unrealised")
+        + _money_text("fx_pnl")
         + [
             {"if": {"filter_query": "{_short} = 1",
                     "column_id": "roce_annualised"},
@@ -223,6 +196,8 @@ TABLE_COLUMNS = [
          format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
     dict(id="unrealised", name="Unrealised £", type="numeric",
          format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
+    dict(id="fx_pnl", name="of which FX £", type="numeric",
+         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
     dict(id="total_pnl", name="Total P&L £", type="numeric",
          format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
     dict(id="roce_total", name="ROCE", type="numeric",
@@ -246,6 +221,7 @@ def positions_to_rows(members: list[Position]) -> list[dict]:
             "peak_capital": p.peak_capital,
             "realised": p.realised,
             "unrealised": p.unrealised,
+            "fx_pnl": p.fx_pnl,
             "total_pnl": p.total_pnl,
             "roce_total": p.roce_total,
             "roce_annualised": p.roce_annualised,
@@ -289,8 +265,6 @@ def _render_inner() -> html.Div:
                             children=f"Show closed ({data['n_closed']})",
                             style={"marginLeft": "10px", "padding": "8px 12px"}),
                 html.Button("Clear selection", id=PREFIX + "clear", n_clicks=0,
-                            style={"marginLeft": "10px", "padding": "8px 12px"}),
-                html.Button("Refresh data", id=PREFIX + "refresh", n_clicks=0,
                             style={"marginLeft": "10px", "padding": "8px 12px"}),
                 html.Span(id=PREFIX + "asof",
                           children=f"as of {data['asof']:%d %b %Y}",
@@ -373,18 +347,6 @@ def render() -> html.Div:
 # yet. app.py already sets suppress_callback_exceptions=True, which these need
 # since the ids are absent from the DOM while another page is showing.
 # --------------------------------------------------------------------------
-
-
-@callback(
-    Output(PREFIX + "version", "data"),
-    Output(PREFIX + "asof", "children"),
-    Input(PREFIX + "refresh", "n_clicks"),
-    State(PREFIX + "version", "data"),
-    prevent_initial_call=True,
-)
-def refresh(_n, version):
-    data = get_data(force=True)
-    return (version or 0) + 1, f"as of {data['asof']:%d %b %Y}"
 
 
 @callback(

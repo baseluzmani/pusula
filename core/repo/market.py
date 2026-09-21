@@ -28,12 +28,12 @@ from core import config, db
 # days=None means "year to date" (measured from last close of prior year).
 PERIODS = [
     ("1D", 1),
-    ("1W", 5),
-    ("1M", 21),
-    ("3M", 63),
-    ("6M", 126),
+    ("1W", 7),
+    ("1M", 30),
+    ("3M", 91),
+    ("6M", 182),
     ("YTD", None),
-    ("1Y", 252),
+    ("1Y", 365),
 ]
 
 # Never meaningful to chart or rank on returns.

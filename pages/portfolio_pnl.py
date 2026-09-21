@@ -23,6 +23,7 @@ import pandas as pd
 
 from core import theme, finance as fin
 from core.repo import portfolio as repo
+from core.roce import MIN_DAYS_TO_ANNUALISE, roce_map
 
 def render():
     return html.Div([
@@ -104,9 +105,14 @@ def _table(show_closed, compact):
     rates = fin.fx_rates(prices)
     gbpusd = rates["USD"]
     price_map = fin.latest_price_map(prices)
+    
     ret_map = fin.returns_map(prices)
+    # Recomputed every render like everything else on this page, so a newly
+    # entered transaction is reflected immediately.
+    roce_by_id = roce_map()
 
     rows = _compute(txns, instruments, price_map, rates, gbpusd)
+    
     if not rows:
         return _msg("No positions to show.")
 
@@ -121,12 +127,12 @@ def _table(show_closed, compact):
     body = []
     for r in open_df.to_dict("records"):
         body.append(_row(r, instruments, price_map, ret_map, rates, ranges,
-                         compact, closed=False))
+                         compact, closed=False, roce_by_id=roce_by_id))
 
     if not closed_df.empty:
         closed_pnl = closed_df["pnl"].dropna().sum()
         if show_closed:
-            span = 8 if compact else 14
+            span = 8 if compact else 15
             body.append(html.Tr([html.Td(
                 f"CLOSED POSITIONS ({len(closed_df)})", colSpan=span,
                 style={"padding": "6px 10px", "fontSize": "10px",
@@ -134,7 +140,8 @@ def _table(show_closed, compact):
                        "background": theme.SURFACE})]))
             for r in closed_df.to_dict("records"):
                 body.append(_row(r, instruments, price_map, ret_map, rates,
-                                 ranges, compact, closed=True))
+                                 ranges, compact, closed=True,
+                                 roce_by_id=roce_by_id))
         else:
             body.append(_closed_summary(len(closed_df), closed_pnl, compact))
 
@@ -198,7 +205,7 @@ def _header(compact):
         cols = ["Fund", "Price", "1D", "1D %", "1W %", "1M %", "3M %", "YTD %"]
     else:
         cols = ["Fund", "Category", "Price", "Avg cost", "Qty", "Value",
-                "P&L", "P&L %", "1D", "1D %", "1W %", "1M %", "3M %", "YTD %"]
+                "P&L", "ROCE", "Ann.", "1D", "1D %", "1W %", "1M %", "3M %", "YTD %"]
     return html.Thead(html.Tr([th(c, i) for i, c in enumerate(cols)]))
 
 
@@ -246,8 +253,28 @@ def _ret_td(v, rng):
                                          else "transparent"),
                           "color": theme.INK})
 
+def _roce_td(pos, attr):
+    """One ROCE cell. Em dash when the engine has nothing meaningful to say.
 
-def _row(r, instruments, price_map, ret_map, rates, ranges, compact, closed):
+    Annualised is greyed and italicised below the minimum holding period
+    rather than blanked, with the day count on hover, so a short-dated rate
+    is visibly unreliable instead of looking like a missing value.
+    """
+    if pos is None or pos.error or not pos.capital_days:
+        return html.Td("\u2014", style=_num_td(theme.NEUTRAL))
+
+    v = getattr(pos, attr)
+    short = (attr == "roce_annualised"
+             and pos.days_deployed < MIN_DAYS_TO_ANNUALISE)
+    colour = theme.NEUTRAL if short else (
+        theme.POSITIVE if v >= 0 else theme.NEGATIVE)
+    style = _num_td(colour, weight=600)
+    if short:
+        style = {**style, "fontStyle": "italic"}
+    return html.Td(f"{v * 100:+.1f}%", style=style,
+                   title=f"{pos.days_deployed:,} days deployed")
+
+def _row(r, instruments, price_map, ret_map, rates, ranges, compact, closed, roce_by_id):
     fid = r["fund_id"]
     pnl = r["pnl"]
     pct = r["pnl_pct"]
@@ -296,8 +323,8 @@ def _row(r, instruments, price_map, ret_map, rates, ranges, compact, closed):
             html.Td(val_disp, style=_num_td(theme.INK, weight=600)),
             html.Td(f"{pnl:+,.0f}" if pnl is not None else "N/A",
                     style=_num_td(colour, weight=700)),
-            html.Td(f"{pct:+.1f}%" if pct is not None else "N/A",
-                    style=_num_td(colour, weight=600)),
+            _roce_td(roce_by_id.get(fid), "roce_total"),
+            _roce_td(roce_by_id.get(fid), "roce_annualised"),
             d1_c,
         ] + ret_cells
 
@@ -321,7 +348,7 @@ def _closed_summary(count, pnl, compact):
         cells += [
             html.Td("Closed", style=_num_td(theme.NEUTRAL)),
             html.Td(f"{pnl:+,.0f}", style=_num_td(colour, weight=700)),
-            html.Td("\u2014", colSpan=6, style=_num_td(theme.NEUTRAL)),
+            html.Td("\u2014", colSpan=8, style=_num_td(theme.NEUTRAL)),
         ]
     return html.Tr(cells, style={"borderBottom": f"1px solid {theme.LINE}",
                                  "background": theme.SURFACE})
@@ -359,7 +386,11 @@ def _totals(all_df, ret_map, compact):
         html.Td("TOTAL", colSpan=5, style={**tb, "textAlign": "left"}),
         html.Td(f"{total_value:,.0f}", style=tb),
         html.Td(f"{total_pnl:+,.0f}", style={**tb, "color": pc}),
-        html.Td(f"{total_pct:+.1f}%", style={**tb, "color": pc}),
+        # A portfolio ROCE is not the sum or the average of the column above -
+        # it needs capital-days pooled across every position and divided once.
+        # Left blank rather than showing a number that does not mean anything.
+        html.Td("\u2014", style={**tb, "color": theme.NEUTRAL}),
+        html.Td("\u2014", style={**tb, "color": theme.NEUTRAL}),
         html.Td(f"{total_1d:+,.0f}", style={**tb, "color": dc}),
         html.Td("", colSpan=5, style={"borderTop": f"2px solid {theme.INK}"}),
     ])
