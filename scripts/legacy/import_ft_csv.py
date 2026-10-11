@@ -6,14 +6,20 @@
 # Usage: python3 scripts/import_ft_csv.py
 
 import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from pathlib import Path
+
+# Repo root (~/pusula) - this file lives at scripts/legacy/import_ft_csv.py
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
 
 import sqlite3
 import glob
 from datetime import datetime
 
-DB_PATH    = 'data/funds.db'
-IMPORT_DIR = 'data/import'
+from core import config
+
+DB_PATH    = config.DB_PATH                  # ~/data/funds.db
+IMPORT_DIR = str(ROOT / 'data' / 'import')   # ~/pusula/data/import
 
 
 def parse_date(date_str):
