@@ -21,6 +21,8 @@ import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html
 from dash.dash_table.Format import Format, Group, Scheme
 
+from core import finance as fin
+from core.repo import portfolio as repo
 from core.roce import (
     MIN_DAYS_TO_ANNUALISE,
     Position,
@@ -156,7 +158,7 @@ TABLE_STYLE = dict(
         {"if": {"column_id": "name"}, "textAlign": "left", "minWidth": "230px",
          "fontWeight": 500},
         {"if": {"column_id": "status"}, "textAlign": "left", "width": "70px"},
-        {"if": {"column_id": "wac"}, "color": "#9ca3af"},
+        {"if": {"column_id": "net_cost"}, "color": "#9ca3af"},
     ],
     style_data_conditional=(
         _rate_bands("roce_total")
@@ -184,8 +186,7 @@ TABLE_COLUMNS = [
     dict(id="status", name="Status", type="text"),
     dict(id="qty", name="Qty", type="numeric",
          format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="wac", name="Avg cost", type="numeric",
-         format=Format(precision=2, scheme=Scheme.fixed)),
+    dict(id="net_cost", name="Net cost", type="text"),
     dict(id="days_deployed", name="Days deployed", type="numeric",
          format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
     dict(id="avg_capital", name="Avg capital £", type="numeric",
@@ -208,6 +209,7 @@ TABLE_COLUMNS = [
 
 
 def positions_to_rows(members: list[Position]) -> list[dict]:
+    instruments = repo.instruments()
     rows = []
     for p in members:
         rows.append({
@@ -215,7 +217,9 @@ def positions_to_rows(members: list[Position]) -> list[dict]:
             "name": p.name,
             "status": p.status,
             "qty": p.qty,
-            "wac": p.wac,
+            "net_cost": fin.fmt_native_cost(
+                p.net_cost_native, p.qty, p.currency,
+                instruments.get(p.instrument, {}).get("price_unit")),
             "days_deployed": p.days_deployed,
             "avg_capital": p.avg_capital,
             "peak_capital": p.peak_capital,

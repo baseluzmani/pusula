@@ -373,7 +373,9 @@ def _fmt_units(units):
         return "\u2014"
     if units == int(units):
         return f"{int(units):,}"
-    return f"{units:,.4f}".rstrip("0").rstrip(".")
+    if abs(units) >= 100:
+        return f"{units:,.0f}"           # large holdings: whole units
+    return f"{units:,.3f}"               # small holdings (BTC, gold): 3 dp
 
 
 def _fmt_price(r):

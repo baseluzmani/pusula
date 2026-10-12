@@ -286,3 +286,21 @@ def returns_map(prices: pd.DataFrame, fund_ids=None) -> dict:
                     if not prior_ytd.empty and prior_ytd.iloc[-1] else None)
         out[fid] = r
     return out
+
+def fmt_native_cost(value, qty, currency, price_unit) -> str:
+    """A per-unit cost in the instrument's own unit, the way its price is shown.
+
+    value is in major units (pounds, dollars, lira). Pence-quoted instruments
+    are shown in pence so the figure sits beside the price on the same scale.
+    Em dash when nothing is held.
+    """
+    if not qty or qty <= 0 or value is None:
+        return "\u2014"
+    if str(price_unit or "").lower() == "pence" and currency == "GBP":
+        v, sym, suffix = value * 100, "", "p"
+    else:
+        v, suffix = value, ""
+        sym = {"GBP": "\u00A3", "USD": "$", "TRY": "\u20BA"}.get(currency, "")
+    sign = "-" if v < 0 else ""
+    num = f"{abs(v):,.2f}" if abs(v) < 100 else f"{abs(v):,.0f}"
+    return f"{sign}{sym}{num}{suffix}"

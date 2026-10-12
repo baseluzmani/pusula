@@ -204,7 +204,7 @@ def _header(compact):
     if compact:
         cols = ["Fund", "Price", "1D", "1D %", "1W %", "1M %", "3M %", "YTD %"]
     else:
-        cols = ["Fund", "Category", "Price", "Avg cost", "Qty", "Value",
+        cols = ["Fund", "Category", "Price", "Net cost", "Qty", "Value",
                 "P&L", "ROCE", "Ann.", "1D", "1D %", "1W %", "1M %", "3M %", "YTD %"]
     return html.Thead(html.Tr([th(c, i) for i, c in enumerate(cols)]))
 
@@ -229,21 +229,18 @@ def _native_price(price, fid, instruments):
         return _fmt(price)
     return _fmt(price, symbol=sym)
 
-
-def _avg_str(avg_gbp, qty, fid, instruments, rates):
-    if not (qty > 0 and avg_gbp > 0):
-        return "\u2014"
-    inst = instruments.get(fid, {})
-    punit = inst.get("price_unit", "pound")
-    curr = inst.get("currency", "GBP")
-    if punit == "pence" and curr == "GBP":
-        return _fmt(avg_gbp * 100, suffix="p")
-    if curr == "USD":
-        return _fmt(avg_gbp * rates.get("USD", 1.26), symbol="$")
-    if curr == "TRY":
-        return _fmt(avg_gbp * rates.get("TRY", 43.0), symbol="\u20BA")
-    return _fmt(avg_gbp, symbol="\u00A3")
-
+def _net_cost_td(pos, instruments):
+    """Net cost per unit from the ROCE engine, in the instrument's own unit:
+    everything paid in less sell proceeds and dividends, over units held."""
+    if pos is None or pos.error:
+        return html.Td("\u2014", style=_num_td(theme.NEUTRAL))
+    inst = instruments.get(pos.instrument, {})
+    return html.Td(
+        fin.fmt_native_cost(pos.net_cost_native, pos.qty, pos.currency,
+                            inst.get("price_unit")),
+        style=_num_td(theme.NEUTRAL),
+        title="Break-even per unit: cost paid in, less sell proceeds and "
+              "dividends, divided by units held")
 
 def _ret_td(v, rng):
     return html.Td(f"{v:+.1f}%" if v is not None else "\u2014",
@@ -317,8 +314,7 @@ def _row(r, instruments, price_map, ret_map, rates, ranges, compact, closed, roc
                     "fontSize": "10px", "textAlign": "center",
                     "color": theme.SLATE}),
             price_c,
-            html.Td(_avg_str(r["avg_cost"], qty, fid, instruments, rates),
-                    style=_num_td(theme.NEUTRAL)),
+            _net_cost_td(roce_by_id.get(fid), instruments),
             html.Td(qty_disp, style=_num_td(theme.TEXT)),
             html.Td(val_disp, style=_num_td(theme.INK, weight=600)),
             html.Td(f"{pnl:+,.0f}" if pnl is not None else "N/A",

@@ -248,3 +248,21 @@ select {
   color: #B8860F;
   font-size: 8px;
 }
+
+/* Dash 4 draws its own − / + buttons beside every dcc.Input(type="number").
+   Hide them, and keep the browser's own spinner arrows hidden too (Dash
+   brings those back on inputs narrower than 100px). */
+.dash-input-stepper {
+  display: none !important;
+}
+
+.dash-input-element[type='number'] {
+  -moz-appearance: textfield !important;
+  appearance: textfield;
+}
+
+.dash-input-element[type='number']::-webkit-outer-spin-button,
+.dash-input-element[type='number']::-webkit-inner-spin-button {
+  -webkit-appearance: none !important;
+  margin: 0;
+}

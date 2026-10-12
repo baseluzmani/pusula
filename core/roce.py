@@ -260,6 +260,14 @@ class Position:
     # not change realised/unrealised/total_pnl/roce_* above.
     fx_pnl: float = 0.0
 
+    # Net cost per unit held, in the instrument's own major unit (pounds,
+    # dollars, lira - never pence). Everything paid in, less everything taken
+    # out (sell proceeds and dividends), divided by the units still held:
+    #     (native book cost - native realised) / qty
+    # i.e. the break-even price for what is left. Can go below zero once a
+    # position has paid for itself. 0.0 when nothing is held.
+    net_cost_native: float = 0.0
+
     @property
     def status(self) -> str:
         if self.error:
@@ -365,9 +373,11 @@ def compute_position(
     # above - and comparing to total_pnl isolates the currency effect as a
     # residual. GBP positions skip this: fx_pnl is exactly 0.0, not a
     # rounding artefact of walking the same numbers twice.
-    if currency == "GBP" or "cash_flow_native" not in t.columns:
-        fx_pnl = 0.0
-    else:
+    # The native walk now also feeds net_cost_native, so it runs for every
+    # position; only the fx_pnl part is skipped for GBP.
+    fx_pnl = 0.0
+    net_cost_native = 0.0
+    if "cash_flow_native" in t.columns:
         nqty = nbook = nrealised = 0.0
         for row in t.itertuples():
             if row.qty > 0:
@@ -386,9 +396,12 @@ def compute_position(
                 nrealised += row.cash_flow_native
             if abs(nqty) < 1e-9:
                 nqty = nbook = 0.0
-        nunrealised = (nqty * (native_latest_price or 0.0) - nbook) if priced else 0.0
-        local_pnl_gbp = (nrealised + nunrealised) / fx_now if fx_now else 0.0
-        fx_pnl = total_pnl - local_pnl_gbp
+        if nqty > 0:
+            net_cost_native = (nbook - nrealised) / nqty
+        if currency != "GBP":
+            nunrealised = (nqty * (native_latest_price or 0.0) - nbook) if priced else 0.0
+            local_pnl_gbp = (nrealised + nunrealised) / fx_now if fx_now else 0.0
+            fx_pnl = total_pnl - local_pnl_gbp
 
     return Position(
         instrument=instrument,
@@ -409,6 +422,7 @@ def compute_position(
         latest_price=float(latest_price) if latest_price is not None else 0.0,
         currency=currency,
         fx_pnl=fx_pnl,
+        net_cost_native=net_cost_native,
         # Built from the list, not dict(...): two sells on the same date are two
         # events, and dict() would keep only the last one.
         realised_events=(
