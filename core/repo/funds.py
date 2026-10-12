@@ -37,11 +37,69 @@ def effective_date(fund_id: str, as_of: str | None = None) -> str | None:
 def fund_holdings(fund_id: str, as_of: str | None = None) -> tuple[pd.DataFrame, str | None]:
     date = effective_date(fund_id, as_of)
     if not date:
-        return pd.DataFrame(columns=["rank", "name", "ticker", "weight_pct"]), None
+        return pd.DataFrame(columns=["rank", "name", "ticker", "weight_pct",
+                                     "key"]), None
     df = db.query(
         "SELECT rank, name, ticker, weight_pct FROM pension_holdings "
         "WHERE fund_id = ? AND scraped_date = ? ORDER BY rank", (fund_id, date))
-    return df, date
+    return _consolidate(df), date
+
+
+def _consolidate(df: pd.DataFrame) -> pd.DataFrame:
+    """Resolve each holding through the ticker map and merge share classes.
+
+    Mapped holdings are keyed by group FIGI, so Samsung common and preference
+    shares - or TSMC as two funds spell it - become one line, shown under the
+    FT name of the group's own security (the common share). Unmapped ones
+    keep their FT name as the key, as before.
+    """
+    if df.empty:
+        return df.assign(key=pd.Series(dtype=str))
+    keys, tickers, parent = [], [], []
+    for r in df.itertuples():
+        hit = etf_repo.resolve_fund_holding(r.ticker, r.name)
+        if hit:
+            keys.append(hit[0]); tickers.append(hit[1]); parent.append(hit[2])
+        else:
+            keys.append("NAME:" + str(r.name).strip().upper())
+            tickers.append(r.ticker or ""); parent.append(True)
+    df = df.assign(key=keys, ticker=tickers, _parent=parent,
+                   name=df["name"].astype(str).str.strip())
+    # Parent rows first so "first" picks the common share's name and ticker.
+    df = df.sort_values("_parent", ascending=False, kind="stable")
+    out = (df.groupby("key", sort=False)
+             .agg(name=("name", "first"), ticker=("ticker", "first"),
+                  weight_pct=("weight_pct", "sum"))
+             .reset_index()
+             .sort_values("weight_pct", ascending=False)
+             .reset_index(drop=True))
+    out.insert(0, "rank", range(1, len(out) + 1))
+    return out[["rank", "name", "ticker", "weight_pct", "key"]]
+
+
+def unmapped_fund_names(limit: int = 40) -> pd.DataFrame:
+    """Latest pension-fund holdings the ticker map cannot resolve, heaviest first."""
+    df = db.query("""
+        SELECT h.fund_name, h.name, h.ticker, h.weight_pct
+        FROM pension_holdings h
+        JOIN (SELECT fund_id, MAX(scraped_date) AS d FROM pension_holdings
+              GROUP BY fund_id) l
+          ON l.fund_id = h.fund_id AND l.d = h.scraped_date
+        WHERE h.weight_pct > 0
+    """)
+    if df.empty:
+        return df
+    miss = [etf_repo.resolve_fund_holding(r.ticker, r.name) is None
+            for r in df.itertuples()]
+    df = df[miss]
+    if df.empty:
+        return df
+    return (df.groupby(["name", "ticker"], dropna=False, sort=False)
+              .agg(weight_pct=("weight_pct", "max"),
+                   funds=("fund_name", lambda s: ", ".join(sorted(set(s)))))
+              .reset_index()
+              .sort_values("weight_pct", ascending=False)
+              .head(limit))
 
 
 # --- Composites ----------------------------------------------------------
@@ -61,29 +119,81 @@ def composite_holdings(composite_id: str,
 
     merged: dict[str, dict] = {}
     dates: list[str] = []
+    shares = _value_shares(comp["components"], as_of)
 
     for component in comp["components"]:
         df, date = fund_holdings(component["fund_id"], as_of)
         if df.empty:
             continue
         dates.append(date)
+        share = shares[component["fund_id"]]
         for row in df.itertuples():
             if not row.weight_pct:
                 continue
-            key = str(row.name).strip()
-            entry = merged.setdefault(key, {"weight": 0.0, "ticker": row.ticker or ""})
-            entry["weight"] += component["weight"] * row.weight_pct
+            entry = merged.setdefault(row.key, {"name": row.name,
+                                                "weight": 0.0,
+                                                "ticker": row.ticker or ""})
+            entry["weight"] += share * row.weight_pct
 
     if not merged:
         return pd.DataFrame(columns=["rank", "name", "ticker", "weight_pct"]), None
 
-    out = (pd.DataFrame([{"name": k, "ticker": v["ticker"],
+    out = (pd.DataFrame([{"name": v["name"], "ticker": v["ticker"],
                           "weight_pct": round(v["weight"], 2)}
-                         for k, v in merged.items()])
+                         for v in merged.values()])
            .sort_values("weight_pct", ascending=False)
            .reset_index(drop=True))
     out.insert(0, "rank", range(1, len(out) + 1))
     return out, (min(dates) if dates else None)
+
+
+def _price_on(fund_id: str, as_of: str | None):
+    """Latest close on or before as_of (latest overall if None)."""
+    if as_of:
+        df = db.query("SELECT close FROM prices WHERE fund_id = ? AND date <= ? "
+                      "ORDER BY date DESC LIMIT 1", (fund_id, as_of))
+    else:
+        df = db.query("SELECT close FROM prices WHERE fund_id = ? "
+                      "ORDER BY date DESC LIMIT 1", (fund_id,))
+    return float(df["close"].iloc[0]) if not df.empty else None
+
+
+def _value_shares(components: list[dict], as_of: str | None) -> dict[str, float]:
+    """Each component's share of the composite's VALUE, summing to 1.
+
+    A composite weight multiplies the component's GBP price (see
+    importers/composites.py), so it is not a percentage of value. The value
+    share is weight x GBP price / sum of the same. Falls back to the weights
+    themselves, normalised, if any component cannot be priced.
+    """
+    fx_ids = {"USD": "YF:GBPUSD=X", "TRY": "YF:GBPTRY=X"}
+    values = {}
+    for c in components:
+        fid = c["fund_id"]
+        meta = db.query("SELECT currency, price_unit FROM instruments "
+                        "WHERE fund_id = ?", (fid,))
+        cur = (meta["currency"].iloc[0] if not meta.empty else None) or "GBP"
+        unit = (meta["price_unit"].iloc[0] if not meta.empty else None) or "pound"
+        price = _price_on(fid, as_of)
+        if price is None:
+            values = None
+            break
+        if unit == "pence":
+            price /= 100.0
+        if cur in fx_ids:
+            rate = _price_on(fx_ids[cur], as_of)
+            if not rate:
+                values = None
+                break
+            price /= rate
+        values[fid] = float(c["weight"]) * price
+
+    if values and sum(values.values()) > 0:
+        total = sum(values.values())
+        return {k: v / total for k, v in values.items()}
+
+    total_w = sum(float(c["weight"]) for c in components) or 1.0
+    return {c["fund_id"]: float(c["weight"]) / total_w for c in components}
 
 
 # --- Unified selector ----------------------------------------------------

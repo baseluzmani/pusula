@@ -298,7 +298,7 @@ def _render_inner() -> html.Div:
                 row_selectable="multi",
                 selected_row_ids=[],
                 sort_action="native",
-                page_size=50,
+                page_action="none",
                 **TABLE_STYLE,
             ),
 

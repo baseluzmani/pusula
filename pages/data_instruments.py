@@ -134,7 +134,7 @@ def render():
             data=[],
             editable=True,
             sort_action="native",
-            page_size=40,
+            page_action="none",
             style_table={"overflowX": "auto"},
             style_header={"backgroundColor": theme.INK, "color": "white",
                           "fontWeight": "600", "fontSize": "11px",

@@ -573,6 +573,7 @@ def _map_view():
         html.Div(id="etf-m-feedback", style={"marginBottom": "10px"}),
         html.Div(id="etf-m-edit", style={"marginBottom": "14px"}),
         card("Identifier records", html.Div(id="etf-m-table")),
+        card("Unmapped fund holdings", html.Div(id="etf-m-unmapped")),
 
         dcc.Store(id="etf-m-selected", data=None),
         dcc.Store(id="etf-m-figis", data=[]),
@@ -674,6 +675,29 @@ def _map_table(status, search, yahoo, group, _refresh):
     return summary, table, df["figi"].tolist()
 
 
+@callback(Output("etf-m-unmapped", "children"), Input("etf-m-refresh", "data"))
+def _unmapped(_refresh):
+    df = funds_repo.unmapped_fund_names()
+    if df.empty:
+        return placeholder("Every pension-fund holding resolves to a record.")
+    head = html.Thead(html.Tr([
+        html.Th("FT name"), html.Th("FT ticker", style={"width": "120px"}),
+        html.Th("Max wt", style={"width": "72px"}), html.Th("Funds"),
+    ]))
+    rows = [html.Tr([
+        html.Td(r.name, style={"fontWeight": 500}),
+        html.Td(_cell(r.ticker), style={"fontSize": "11px", **theme.NUM,
+                                         "color": theme.SLATE}),
+        html.Td(f"{r.weight_pct:.2f}%", className="num"),
+        html.Td(r.funds, style={"fontSize": "11px", "color": theme.SLATE}),
+    ]) for r in df.itertuples()]
+    note = html.Div("Find the stock above, then paste the FT name or ticker into "
+                    "its 'FT codes / names' box. Separate several with |.",
+                    style={"fontSize": "11.5px", "color": theme.SLATE,
+                           "marginBottom": "8px"})
+    return html.Div([note, html.Table([head, html.Tbody(rows)], className="pz")])
+
+
 def _pill(value, label, colour):
     return html.Div([
         html.Span(value, style={"fontSize": "19px", "fontWeight": 600,
@@ -751,6 +775,8 @@ def _edit_panel(figi, _refresh):
             field("Yahoo ID", "etf-m-f-yahoo", yahoo, "BA.L", "110px"),
             field("Group FIGI", "etf-m-f-group", group, "parent, or blank", "150px"),
             field("Notes", "etf-m-f-notes", r["notes"], "optional", "130px"),
+            field("FT codes / names", "etf-m-f-ft", r.get("ft_code"),
+                  "2330:TAI | name as FT shows it", "320px"),
             html.Div([
                 _button("Save and approve", "etf-m-save", primary=True),
                 html.Span(" "),
@@ -770,11 +796,11 @@ def _edit_panel(figi, _refresh):
     State("etf-m-f-bbg", "value"), State("etf-m-f-raw", "value"),
     State("etf-m-f-sedol", "value"), State("etf-m-f-isin", "value"),
     State("etf-m-f-yahoo", "value"), State("etf-m-f-group", "value"),
-    State("etf-m-f-notes", "value"),
+    State("etf-m-f-notes", "value"), State("etf-m-f-ft", "value"),
     prevent_initial_call=True,
 )
 def _map_actions(save_n, empty_n, selected, refresh,
-                 figi, name, bbg, raw, sedol, isin, yahoo, group, notes):
+                 figi, name, bbg, raw, sedol, isin, yahoo, group, notes, ft):
     triggered = ctx.triggered_id
     if not triggered:
         return no_update, no_update
@@ -787,11 +813,13 @@ def _map_actions(save_n, empty_n, selected, refresh,
 
         if triggered == "etf-m-empty":
             repo.map_mark_empty(selected, fields, group)
+            repo.map_set_ft_code(selected, ft)
             return refresh + 1, _feedback(
                 f"{selected[:20]} marked reviewed with no price feed.")
 
         if triggered == "etf-m-save":
             result = repo.map_save(selected, fields, yahoo, group, figi)
+            repo.map_set_ft_code(result, ft)
             label = f"YF:{yahoo}" if yahoo else "no Yahoo ID"
             return refresh + 1, _feedback(f"{label} saved for {result[:20]}.")
     except Exception as exc:                                   # noqa: BLE001

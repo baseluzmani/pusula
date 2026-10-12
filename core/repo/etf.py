@@ -52,7 +52,7 @@ def _stock_map() -> tuple:
     """
     smap = db.query(
         "SELECT figi, name, bloomberg_code, base_ticker, raw_ticker, "
-        "       sedol, isin, yahoo_id, group_figi "
+        "       sedol, isin, yahoo_id, group_figi, ft_code "
         "FROM stock_identifier_map")
 
     lookups = {k: {} for k in
@@ -63,9 +63,28 @@ def _stock_map() -> tuple:
             if val and str(val).lower() != "nan":
                 table.setdefault(str(val).upper().strip(), idx)
 
-    # Canonical name and yahoo_id per group, resolved once rather than
-    # re-searched for every holding row.
-    parents = smap.set_index("figi")[["name", "yahoo_id"]].to_dict("index")
+    # Fund (FT) identifiers: one or more FT tickers or FT names per row,
+    # separated by "|". Matched case-insensitively on the whole string.
+    # Bloomberg code without the exchange name some rows carry:
+    # "2330 TT (Taiwan Stock Exchange)" -> "2330 TT".
+    lookups["bbg_short"] = {}
+    for idx, val in smap["bloomberg_code"].items():
+        if val and str(val).lower() != "nan":
+            short = str(val).split("(")[0].strip().upper()
+            lookups["bbg_short"].setdefault(short, idx)
+
+    lookups["ft_code"] = {}
+    for idx, val in smap["ft_code"].items():
+        if val and str(val).lower() != "nan":
+            for part in str(val).split("|"):
+                part = part.strip().upper()
+                if part:
+                    lookups["ft_code"].setdefault(part, idx)
+
+    # Canonical name, yahoo_id and Bloomberg code per group, resolved once
+    # rather than re-searched for every holding row.
+    parents = smap.set_index("figi")[["name", "yahoo_id",
+                                      "bloomberg_code"]].to_dict("index")
 
     return smap, lookups, parents
 
@@ -102,6 +121,56 @@ def _resolve(ticker, name, isin, smap, lookups, parents) -> tuple[str, str, str 
     if str(cname).lower() == "nan":
         cname = name
     return str(gfigi), cname, parent.get("yahoo_id") or row["yahoo_id"]
+
+
+# FT exchange suffix -> Bloomberg exchange code(s), tried in order. FT gives
+# pension-fund holdings as "2330:TAI"; the map holds "2330 TT".
+FT_EXCH = {
+    "TAI": ("TT",), "TWO": ("TT",), "HKG": ("HK",), "ASX": ("AU",),
+    "SES": ("SP",), "NSI": ("IN",), "BSE": ("IN",), "KSC": ("KS",),
+    "KOE": ("KS",), "JNB": ("SJ",), "TYO": ("JP",), "LSE": ("LN",),
+    "SHH": ("CH",), "SHZ": ("CH",), "BKK": ("TB",), "SAO": ("BZ",),
+    "MEX": ("MM",), "KLS": ("MK",), "JKT": ("IJ",), "PHS": ("PM",),
+    "NYQ": ("US", "UN"), "NSQ": ("US", "UW", "UQ"), "NAS": ("US", "UW"),
+    "ASE": ("US",), "PCQ": ("US",), "GER": ("GR",), "PAR": ("FP",),
+    "AEX": ("NA",), "SWX": ("SW",), "TOR": ("CN",),
+}
+
+
+def resolve_fund_holding(ticker, name) -> tuple[str, str, bool] | None:
+    """Map one pension-fund holding to (group_figi, ticker, is_parent).
+
+    is_parent is True when the matched record is the group's own row (e.g.
+    Samsung common rather than the preference shares), so the caller can
+    prefer that line's FT name when several lines merge.
+
+    Tried in order: the FT ticker in the ft_code column, the FT ticker
+    converted to a Bloomberg code, then the FT name in the ft_code column.
+    None when nothing matches - the caller keeps the FT name as it is.
+    """
+    smap, lookups, parents = _stock_map()
+    t = str(ticker).strip().upper() if ticker else ""
+    idx = None
+    if t:
+        idx = lookups["ft_code"].get(t)
+        if idx is None and ":" in t:
+            sym, exch = t.rsplit(":", 1)
+            for code in FT_EXCH.get(exch, ()):
+                idx = lookups["bbg_short"].get(f"{sym} {code}")
+                if idx is not None:
+                    break
+    if idx is None and name:
+        idx = lookups["ft_code"].get(str(name).strip().upper())
+    if idx is None:
+        return None
+
+    row = smap.iloc[idx]
+    gfigi = (row["group_figi"] if row["group_figi"]
+             and str(row["group_figi"]).lower() != "nan" else row["figi"])
+    parent = parents.get(gfigi, {})
+    code = parent.get("bloomberg_code") or row["bloomberg_code"] or t
+    code = str(code or "").split("(")[0].strip()
+    return str(gfigi), code, str(row["figi"]) == str(gfigi)
 
 
 # --- Consolidated holdings ----------------------------------------------
@@ -447,8 +516,9 @@ def map_records(status: str = "unreviewed", search: str = "",
 
     if search:
         conditions.append("(LOWER(s.name) LIKE ? OR LOWER(s.bloomberg_code) LIKE ? "
-                          "OR LOWER(s.base_ticker) LIKE ? OR LOWER(s.raw_ticker) LIKE ?)")
-        params += [f"%{search.lower()}%"] * 4
+                          "OR LOWER(s.base_ticker) LIKE ? OR LOWER(s.raw_ticker) LIKE ? "
+                          "OR LOWER(COALESCE(s.ft_code, '')) LIKE ?)")
+        params += [f"%{search.lower()}%"] * 5
     if search_yahoo:
         conditions.append("LOWER(COALESCE(s.yahoo_id, '')) LIKE ?")
         params.append(f"%{search_yahoo.lower()}%")
@@ -475,7 +545,7 @@ def map_record(figi: str) -> dict | None:
     cols = ", ".join(f"s.{c.strip()}" for c in MAP_COLUMNS.split(","))
     df = db.query(f"""
         {_LATEST_WEIGHTS}
-        SELECT {cols}, ROUND(w.max_weight, 2) AS max_weight
+        SELECT {cols}, s.ft_code, ROUND(w.max_weight, 2) AS max_weight
         FROM stock_identifier_map s
         LEFT JOIN w ON w.t IN (s.bloomberg_code, s.base_ticker, s.raw_ticker, s.sedol)
         WHERE s.figi = ? LIMIT 1
@@ -542,6 +612,14 @@ def map_save(figi: str, fields: dict, yahoo_id: str | None,
                   values["sedol"], values["isin"], figi))
     clear_cache()
     return target
+
+
+def map_set_ft_code(figi: str, ft_code: str | None) -> None:
+    """Set (or clear) the FT tickers/names that fund holdings use for a row."""
+    parts = [p.strip() for p in str(ft_code or "").split("|") if p.strip()]
+    db.execute("UPDATE stock_identifier_map SET ft_code = ? WHERE figi = ?",
+               ("|".join(parts) or None, figi))
+    clear_cache()
 
 
 def map_mark_empty(figi: str, fields: dict, group_figi: str | None) -> None:
