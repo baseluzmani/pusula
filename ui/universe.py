@@ -3,12 +3,14 @@ Shared universe selector for the Markets section.
 
 Rendered once above the tabs. Holds the chosen fund universe in a single
 store (``markets-universe``) so the selection persists as the user moves
-between Transactions, Compare and Heatmap.
+between Transactions, Compare, Heatmap and Momentum.
 
-Store shape:  {"mode": "holdings" | "all" | "select", "picked": [fund_id, ...]}
+Store shape:  {"mode": "holdings" | "all" | "type" | "select",
+               "picked": [fund_id, ...], "types": [asset_type, ...]}
 
 - mode "holdings": the resolved ids are open positions (portfolio_holdings)
 - mode "all":      every instrument with prices
+- mode "type":     every priced instrument of the asset types in "types"
 - mode "select":   exactly the ids in "picked" (checkbox dropdown)
 
 ``resolve_ids(store)`` turns the store into the concrete id list every tab
@@ -32,6 +34,8 @@ def resolve_ids(store: dict) -> list:
     mode = store.get("mode")
     if mode == "all":
         return repo.all_instrument_ids()
+    if mode == "type":
+        return repo.ids_for_types(store.get("types"))
     if mode == "select":
         return list(store.get("picked") or [])
     if mode == "holdings":
@@ -46,7 +50,7 @@ def is_chosen(store) -> bool:
 
 def default_store() -> dict:
     """First-load state: no universe chosen, so no data is loaded."""
-    return {"mode": None, "picked": []}
+    return {"mode": None, "picked": [], "types": []}
 
 
 def selector_bar():
@@ -64,6 +68,7 @@ def selector_bar():
                 options=[
                     {"label": "My holdings", "value": "holdings"},
                     {"label": "All instruments", "value": "all"},
+                    {"label": "Asset type", "value": "type"},
                     {"label": "Select\u2026", "value": "select"},
                 ],
                 value="holdings",
@@ -76,6 +81,14 @@ def selector_bar():
                 "fontSize": "11px", "color": theme.NEUTRAL, "marginLeft": "6px"}),
         ], style={"display": "flex", "alignItems": "center",
                   "flexWrap": "wrap", "gap": "6px"}),
+
+        # Asset-type dropdown, only visible in "Asset type" mode. Options are
+        # filled the first time the mode is chosen (lazy, like the picker).
+        html.Div(id="markets-types-wrap", style={"display": "none"}, children=[
+            dcc.Dropdown(id="markets-types", multi=True, value=[], options=[],
+                         placeholder="Choose asset types\u2026",
+                         style={"fontSize": "13px"}),
+        ]),
 
         # Checkbox dropdown, only visible in "Select..." mode.
         html.Div(id="markets-picker-wrap", style={"display": "none"}, children=[
@@ -130,6 +143,22 @@ def _toggle_picker(mode):
     return {"display": "none"}
 
 
+# Show/hide the asset-type dropdown, and fill its options on first use.
+@callback(
+    Output("markets-types-wrap", "style"),
+    Output("markets-types", "options"),
+    Input("markets-mode", "value"),
+    State("markets-types", "options"),
+)
+def _toggle_types(mode, options):
+    if mode != "type":
+        return {"display": "none"}, no_update
+    style = {"display": "block", "marginTop": "10px", "maxWidth": "460px"}
+    if options:
+        return style, no_update
+    return style, [{"label": t, "value": t} for t in repo.asset_types()]
+
+
 # Populate picker options the first time Select... is entered, defaulting to
 # everything ticked (per the agreed behaviour). Search filters the visible
 # options without losing ticks outside the filter.
@@ -180,11 +209,19 @@ def _fill_picker(mode, search, _all, _none, current, store):
     Output("markets-universe-count", "children"),
     Input("markets-mode", "value"),
     Input("markets-picker", "value"),
+    Input("markets-types", "value"),
     State("markets-picker", "options"),
 )
-def _write_store(mode, picked, options):
+def _write_store(mode, picked, types, options):
     if mode is None:
         return default_store(), "Choose a universe to load data"
+    if mode == "type":
+        types = list(types or [])
+        ids = repo.ids_for_types(types)
+        store = {"mode": "type", "picked": [], "types": types}
+        count = (f"{len(ids)} instruments" if types
+                 else "Choose one or more asset types")
+        return store, count
     if mode == "select":
         # picked holds only currently-visible ticks; merge with any ticked
         # rows filtered out by an active search is handled in _fill_picker,

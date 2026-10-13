@@ -1,10 +1,10 @@
 """Markets section — registered page. Renders the shared universe selector
-above the Transactions / Compare / Heatmap tabs."""
+above the Transactions / Compare / Heatmap / Momentum tabs."""
 import dash
 from dash import html, dcc, callback, Input, Output
 
 from ui import universe
-from pages import transactions, compare, heatmap
+from pages import transactions, compare, heatmap, momentum
 
 dash.register_page(__name__, path="/markets", name="Markets", order=2)
 
@@ -12,6 +12,7 @@ TABS = {
     "Transactions": transactions.render,
     "Compare": compare.render,
     "Heatmap": heatmap.render,
+    "Momentum": momentum.render,
 }
 
 

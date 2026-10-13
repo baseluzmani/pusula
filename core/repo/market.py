@@ -36,8 +36,10 @@ PERIODS = [
     ("1Y", 365),
 ]
 
-# Never meaningful to chart or rank on returns.
-EXCLUDED_TYPES = ("Cash", "House")
+# Never meaningful to chart or rank on returns. "Property" is the type the
+# house actually carries in instruments; "House" is kept in case anything
+# still uses the old name.
+EXCLUDED_TYPES = ("Cash", "House", "Property")
 
 
 # --- Raw reads -----------------------------------------------------------
@@ -112,6 +114,50 @@ def all_instrument_ids() -> list:
     """Every fund that has at least one price - the "All instruments" universe."""
     df = db.query("SELECT DISTINCT fund_id FROM prices ORDER BY fund_id")
     return df["fund_id"].tolist() if not df.empty else []
+
+
+def asset_types() -> list:
+    """Asset types with at least one priced instrument, for the "Asset type"
+    universe dropdown. Excluded types (cash, the house) are left out because
+    returns on them mean nothing."""
+    df = db.query("""
+        SELECT DISTINCT i.asset_type
+        FROM instruments i
+        WHERE i.asset_type IS NOT NULL AND i.asset_type <> ''
+          AND EXISTS (SELECT 1 FROM prices p WHERE p.fund_id = i.fund_id)
+        ORDER BY i.asset_type
+    """)
+    if df.empty:
+        return []
+    return [t for t in df["asset_type"] if t not in EXCLUDED_TYPES]
+
+
+def ids_for_types(types) -> list:
+    """Every priced instrument whose asset_type is one of ``types`` - the
+    "Asset type" universe."""
+    types = [t for t in (types or []) if t not in EXCLUDED_TYPES]
+    if not types:
+        return []
+    df = db.query(f"""
+        SELECT i.fund_id
+        FROM instruments i
+        WHERE i.asset_type IN ({_placeholders(types)})
+          AND EXISTS (SELECT 1 FROM prices p WHERE p.fund_id = i.fund_id)
+        ORDER BY i.fund_id
+    """, tuple(types))
+    return df["fund_id"].tolist() if not df.empty else []
+
+
+def benchmarks() -> pd.DataFrame:
+    """Instruments offered as a Momentum benchmark: Yahoo indices (YF:^...)
+    plus anything typed Index. Columns: fund_id, name."""
+    return db.query("""
+        SELECT i.fund_id, COALESCE(NULLIF(i.name, ''), i.fund_id) AS name
+        FROM instruments i
+        WHERE (i.fund_id LIKE 'YF:^%' OR i.asset_type = 'Index')
+          AND EXISTS (SELECT 1 FROM prices p WHERE p.fund_id = i.fund_id)
+        ORDER BY name
+    """)
 
 
 # --- Transactions --------------------------------------------------------

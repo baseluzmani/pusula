@@ -18,6 +18,11 @@ POSITIVE   = "#127A54"
 NEGATIVE   = "#A63A34"
 NEUTRAL    = "#98A1B3"
 
+# --- Charts --------------------------------------------------------------
+CHART_HELD  = "#2A78D6"   # marks for positions you hold
+CHART_OTHER = NEUTRAL     # marks for everything else in the universe
+CHART_ZERO  = "#CBD2DA"   # zero / reference lines
+
 # --- Type ----------------------------------------------------------------
 FONT_UI = ("-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
            "'Helvetica Neue', Arial, sans-serif")
