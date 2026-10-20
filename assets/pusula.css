@@ -195,44 +195,6 @@ select {
 }
 
 
-/* Indicators is dark; the picker ships its own light DOM, which inline
-   styles cannot reach. Scoped by the wrapper so the light pages keep theirs. */
-.ind-dark .DateInput,
-.ind-dark .DateInput_input,
-.ind-dark .SingleDatePickerInput {
-  background: #1B1613 !important;
-  color: #FFF1E5 !important;
-  border-color: #2E2721 !important;
-}
-
-.ind-dark .DateInput_input {
-  font-family: 'IBM Plex Mono', monospace;
-}
-
-.ind-dark .SingleDatePickerInput__withBorder {
-  border-color: #2E2721 !important;
-}
-
-/* The date picker renders its own DOM from react-dates, whose class names
-   vary by version. Targeting every input inside the dark page catches it
-   without needing to know which. */
-.ind-dark input,
-.ind-dark .DateInput,
-.ind-dark .DateInput_input,
-.ind-dark .SingleDatePickerInput,
-.ind-dark .SingleDatePickerInput__withBorder,
-.ind-dark .DateInput_input__focused {
-  background-color: #1B1613 !important;
-  color: #FFF1E5 !important;
-  border-color: #2E2721 !important;
-  font-family: 'IBM Plex Mono', monospace !important;
-}
-
-.ind-dark .SingleDatePickerInput__withBorder,
-.ind-dark .DateInput {
-  border-radius: 2px;
-}
-
 /* Compare: ticked rows. Toggled in place by the _mark callback in
    pages/compare.py, so ticking never rebuilds the table. */
 .cmp-picked {

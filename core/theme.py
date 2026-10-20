@@ -25,6 +25,14 @@ CHART_ZERO  = "#CBD2DA"   # zero / reference lines
 TINT_NEAR   = "#FFF4D6"   # Monitor: a level the price is close to
 TINT_HIT    = "#FFDFA8"   # Monitor: a level the price has reached
 
+# Indicators: CNN Fear & Greed zones. The ends reuse POSITIVE and NEGATIVE so
+# "extreme" reads as the strongest version of colours used everywhere else.
+ZONE_EXTREME_FEAR  = NEGATIVE
+ZONE_FEAR          = "#C9822B"
+ZONE_NEUTRAL       = NEUTRAL
+ZONE_GREED         = "#4E9F7A"
+ZONE_EXTREME_GREED = POSITIVE
+
 # --- Type ----------------------------------------------------------------
 FONT_UI = ("-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "
            "'Helvetica Neue', Arial, sans-serif")
