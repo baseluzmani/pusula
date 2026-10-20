@@ -22,6 +22,8 @@ NEUTRAL    = "#98A1B3"
 CHART_HELD  = "#2A78D6"   # marks for positions you hold
 CHART_OTHER = NEUTRAL     # marks for everything else in the universe
 CHART_ZERO  = "#CBD2DA"   # zero / reference lines
+TINT_NEAR   = "#FFF4D6"   # Monitor: a level the price is close to
+TINT_HIT    = "#FFDFA8"   # Monitor: a level the price has reached
 
 # --- Type ----------------------------------------------------------------
 FONT_UI = ("-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, "

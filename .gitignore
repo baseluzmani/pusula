@@ -12,3 +12,4 @@ inbox/
 .DS_Store
 logs/
 *.zip
+*.patch
