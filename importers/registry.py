@@ -13,8 +13,8 @@ Nothing else needs changing.
 from dataclasses import dataclass
 from typing import Callable
 
-from importers import (backfill, backup, composites, ft_funds, live_prices,
-                       snapshot, yahoo_prices)
+from importers import (backfill, backup, composites, fear_greed, ft_funds,
+                       live_prices, snapshot, yahoo_prices)
 
 try:
     from importers import etf_holdings as _etf_holdings
@@ -78,6 +78,11 @@ def _backup():
     return r.get("kept", 0), r.get("message", "")
 
 
+def _fear_greed():
+    r = fear_greed.run()
+    return r.get("saved", 0), r.get("message", "")
+
+
 REGISTRY: list[Importer] = [
     Importer(
         id="ft_funds",
@@ -134,6 +139,19 @@ REGISTRY: list[Importer] = [
         description=("Rebuilds the blended series for pension composites, "
                      "rebased to 100 at the first date all components share."),
         run=_composites,
+    ),
+    Importer(
+        id="fear_greed",
+        label="CNN Fear & Greed",
+        mode="auto",
+        schedule="Hourly 14:05-22:05, then 22:50, weekdays",
+        source="production.dataviz.cnn.io (the JSON behind CNN's chart)",
+        target_tables=["macro_observations"],
+        description=("Headline score with a year of history, plus the seven "
+                     "component scores, which CNN publishes for today only. "
+                     "Refetches the last ten days, because CNN restates "
+                     "recent closes."),
+        run=_fear_greed,
     ),
     Importer(
         id="snapshot",

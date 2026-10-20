@@ -24,7 +24,7 @@ from dash import html, dcc, callback, Input, Output, State, no_update
 import pandas as pd
 import plotly.graph_objects as go
 
-from core import finance as fin, valuation as val
+from core import finance as fin, sentiment, valuation as val
 from core.repo import macro as repo
 from core.repo import portfolio as pf
 
@@ -45,6 +45,7 @@ NEG = "#E5605B"
 WARN = "#E0A458"
 BLUE = "#6FA8DC"
 ACCENT = "#F2957B"
+DEEP_POS = "#2F8F68"   # extreme greed: a step past POS, not a new hue
 
 MONO = "'IBM Plex Mono', ui-monospace, monospace"
 
@@ -62,11 +63,24 @@ REAL = [("DGS10", "10Y nominal", BLUE, None),
         ("DFII10", "10Y real (TIPS)", POS, None),
         ("T10YIE", "10Y breakeven", WARN, "3 2")]
 
+# VIX from Yahoo rather than FRED's VIXCLS. FRED posts the close a day or two
+# late, which was tolerable alone and is not beside a same-day Fear & Greed:
+# the two would disagree about what day it is. VIXCLS is still collected and
+# stays in the series browser as a cross-check.
+VIX = "YF:^VIX"
+
+# CNN Fear & Greed, from importers/fear_greed.py. Zone colours follow the
+# page's own meaning of NEG and POS rather than CNN's palette.
+FG = "CNNFG"
+FG_COLOURS = {"Extreme fear": NEG, "Fear": WARN, "Neutral": MUTED,
+              "Greed": POS, "Extreme greed": DEEP_POS}
+
 # The regime strip. Each is (series, label, invert, unit) - invert marks the
 # ones where a fall is the risk-on reading, so the colour is not simply "up is
 # green". VIX rising is not good news.
 REGIME = [
-    ("VIXCLS",       "VIX",       "CBOE",      True,  ""),
+    (VIX,            "VIX",       "CBOE",      True,  ""),
+    (FG,             "Fear & Greed", "CNN",    False, ""),
     ("YF:DX-Y.NYB",  "DXY",       "ICE",       True,  ""),
     ("DFII10",       "10Y real",  "DFII10",    False, "%"),
     ("T10Y2Y",       "2s10s",     "US",        False, "%"),
@@ -135,7 +149,8 @@ def layout():
                   "gap": "20px", "flexWrap": "wrap"}),
 
         html.Div(id="ind-strip", style={
-            "display": "grid", "gridTemplateColumns": "repeat(6, 1fr)",
+            "display": "grid",
+            "gridTemplateColumns": f"repeat({len(REGIME)}, 1fr)",
             "gap": "1px", "background": GRID, "border": f"1px solid {LINE}",
             "marginBottom": "14px"}),
 
@@ -166,13 +181,11 @@ def layout():
             html.Div([
                 _head("Volatility", "VIX, against its own year's range."),
                 dcc.Graph(id="ind-vix", config={"displayModeBar": False}),
-            ], style={**CARD, "flex": "1"}),
+            ], style={**CARD, "flex": "1", "marginRight": "12px"}),
             html.Div([
-                _head("Gilt real & breakeven",
-                      "Real yields and implied inflation, direct from the "
-                      "index-linked curve."),
-                dcc.Graph(id="ind-gilt-real",
-                          config={"displayModeBar": False}),
+                _head("Fear & Greed",
+                      "Seven signals, one mood. Below 25 is extreme fear."),
+                dcc.Graph(id="ind-fg", config={"displayModeBar": False}),
             ], style={**CARD, "flex": "1"}),
         ], style={"display": "flex", "marginBottom": "12px"}),
 
@@ -184,6 +197,13 @@ def layout():
             html.Div([
                 _head("Curve evolution", "One curve per quarter."),
                 dcc.Graph(id="ind-evolution", config={"displayModeBar": False}),
+            ], style={**CARD, "flex": "1", "marginRight": "12px"}),
+            html.Div([
+                _head("Gilt real & breakeven",
+                      "Real yields and implied inflation, direct from the "
+                      "index-linked curve."),
+                dcc.Graph(id="ind-gilt-real",
+                          config={"displayModeBar": False}),
             ], style={**CARD, "flex": "1"}),
         ], style={"display": "flex", "marginBottom": "12px"}),
 
@@ -295,6 +315,69 @@ def _shade(fig, lo, hi):
 
 # --- regime strip ---------------------------------------------------------
 
+def _fg_cell(st, label, sub):
+    """The Fear & Greed box: the same frame as its neighbours, another bar.
+
+    The others place today in its own year's range, because a level means
+    little without one. This score is already a scale - 0 to 100, cut into
+    CNN's five zones - so the bar is that scale in its zone colours, and the
+    word under it names the zone today is in.
+    """
+    value, chg = st["value"], st.get("change")
+    word = sentiment.zone(value)
+
+    if chg is None or abs(chg) < 1e-9:
+        colour, sign = MUTED, ""
+    else:
+        colour, sign = (POS, "+") if chg > 0 else (NEG, "")
+
+    segments = [html.Div(style={"flex": f"{hi - lo:g}", "height": "2px",
+                                "background": FG_COLOURS[name],
+                                "opacity": .55})
+                for lo, hi, name in sentiment.ZONES]
+
+    return html.Div([
+        html.Div([
+            html.Span(label),
+            html.Span(sub, style={"fontSize": "9px", "opacity": .7}),
+        ], style={"fontSize": "9.5px", "letterSpacing": "0.13em",
+                  "textTransform": "uppercase", "color": MUTED,
+                  "display": "flex", "justifyContent": "space-between",
+                  "gap": "6px", "marginBottom": "6px"}),
+
+        html.Div([
+            html.B(f"{value:.1f}", style={
+                "fontFamily": MONO, "fontSize": "21px", "fontWeight": 500,
+                "letterSpacing": "-0.02em", "color": PAPER}),
+            html.Span("" if chg is None else f"{sign}{chg:.1f}",
+                      style={"fontFamily": MONO, "fontSize": "11px",
+                             "fontWeight": 500, "color": colour}),
+        ], style={"display": "flex", "alignItems": "baseline",
+                  "gap": "8px", "marginBottom": "9px"}),
+
+        html.Div([
+            html.Div(segments, style={"position": "absolute", "top": "5px",
+                                      "left": 0, "right": 0,
+                                      "display": "flex"}),
+            html.Div(style={"position": "absolute", "top": "1px",
+                            "left": f"calc({value:.1f}% - 0.75px)",
+                            "width": "1.5px", "height": "10px",
+                            "background": PAPER}),
+            html.Div([
+                html.Span("0"),
+                html.Span(word, style={"color": FG_COLOURS[word],
+                                       "textTransform": "uppercase",
+                                       "letterSpacing": "0.08em"}),
+                html.Span("100"),
+            ], style={"position": "absolute", "top": "13px", "left": 0,
+                      "right": 0, "display": "flex",
+                      "justifyContent": "space-between",
+                      "fontFamily": MONO, "fontSize": "8.5px",
+                      "color": "#6B5C51"}),
+        ], style={"position": "relative", "height": "24px"}),
+    ], style={"background": PANEL, "padding": "11px 13px 8px"})
+
+
 @callback(Output("ind-strip", "children"), Output("ind-asof", "children"),
           Input("ind-from", "value"))
 def _strip(_since):
@@ -316,6 +399,10 @@ def _strip(_since):
             continue
 
         latest_date = max(latest_date or st["date"], st["date"])
+        if sid == FG:
+            cells.append(_fg_cell(st, label, sub))
+            continue
+
         rng = (st["hi"] - st["lo"]) or 1
         pct = max(0.0, min(1.0, (st["value"] - st["lo"]) / rng))
         chg = st.get("change")
@@ -985,18 +1072,18 @@ def _vix(since):
     range removes the need to remember it.
     """
     since = (since or DEFAULT_FROM)[:10]
-    df = repo.observations("VIXCLS", since)
-    if df.empty:
+    s = _series_for(VIX, since)
+    if s.empty:
         return _blank("No VIX data", 330)
 
-    st = repo.range_stats("VIXCLS", 365)
+    st = repo.range_stats(VIX, 365)
     fig = go.Figure()
     if st:
         fig.add_hrect(y0=st["lo"], y1=st["hi"], fillcolor="#3A312A",
                       opacity=.30, layer="below", line_width=0)
 
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["value"], mode="lines", name="VIX",
+        x=s.index, y=s.values, mode="lines", name="VIX",
         line=dict(color=ACCENT, width=1.4),
         hovertemplate="%{x|%d %b %Y}: %{y:.2f}<extra></extra>"))
 
@@ -1067,4 +1154,54 @@ def _gilt_real(since):
             line=dict(color=colour, width=1.6, dash=dash_),
             hovertemplate="%{y:.2f}%<extra>" + label + "</extra>"))
     _dark(fig, 262, "Yield (%)", zero=True)
+    return fig
+
+@callback(Output("ind-fg", "figure"), Input("ind-from", "value"))
+def _fear_greed(since):
+    """CNN's headline score over the window, on its own five zones.
+
+    The zones are shaded behind the line and named on the y-axis in place of
+    numbers, and the line takes the colour of the zone it is in - so where the
+    mood sits reads at a glance, and the number is on the strip and in the
+    hover. Only the headline is charted: CNN publishes the component scores
+    for today alone, so their history is only what this machine has kept.
+    """
+    since = (since or DEFAULT_FROM)[:10]
+    df = repo.observations(FG, since)
+    if df.empty:
+        return _blank("No Fear & Greed data — run the CNN importer", 330)
+    s = df["value"]
+
+    fig = go.Figure()
+    for lo, hi, name in sentiment.ZONES:
+        fig.add_hrect(y0=lo, y1=hi, fillcolor=FG_COLOURS[name], opacity=.07,
+                      layer="below", line_width=0)
+
+    for name, (xs, ys) in sentiment.split_by_zone(s).items():
+        fig.add_trace(go.Scatter(
+            x=xs, y=ys, mode="lines", hoverinfo="skip",
+            line=dict(color=FG_COLOURS[name], width=1.6)))
+
+    # One invisible trace carries the hover, so each day shows once with its
+    # zone rather than once per coloured piece it happens to touch.
+    fig.add_trace(go.Scatter(
+        x=s.index, y=s.values, mode="lines",
+        line=dict(width=0, color="rgba(0,0,0,0)"),
+        customdata=[sentiment.zone(v) for v in s.values],
+        hovertemplate="%{y:.1f} · %{customdata}<extra></extra>"))
+
+    last = float(s.iloc[-1])
+    fig.add_trace(go.Scatter(
+        x=[s.index[-1]], y=[last], mode="markers", hoverinfo="skip",
+        marker=dict(size=8, color=FG_COLOURS[sentiment.zone(last)],
+                    line=dict(color=PANEL, width=2))))
+
+    _dark(fig, 330, "", legend=False)
+    fig.update_yaxes(
+        range=[0, 100], showgrid=False,
+        tickvals=[(lo + hi) / 2 for lo, hi, _ in sentiment.ZONES],
+        ticktext=[f"<span style='color:{FG_COLOURS[n]}'>{n}</span>"
+                  for _, _, n in sentiment.ZONES],
+        tickfont=dict(size=9.5, family="'IBM Plex Sans Condensed', "
+                                       "sans-serif"))
     return fig

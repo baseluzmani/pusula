@@ -92,6 +92,30 @@ def to_fetch():
     return df.to_dict("records") if not df.empty else []
 
 
+def ensure_series(rows) -> int:
+    """Add catalogue rows that are not there yet; leave existing ones alone.
+
+    rows: [(id, name, units, frequency, category, source, source_id,
+    dashboard, active)]. For importers that bring their own series rather
+    than having them seeded. An existing row is never overwritten, so a name
+    or dashboard flag changed by hand survives the next run.
+
+    Checked by id rather than with INSERT OR IGNORE, which would only skip
+    duplicates if the table has a unique key on id - and the schema was
+    created by the migration, not here.
+    """
+    have = set(db.query("SELECT id FROM macro_series")["id"])
+    new = [r for r in rows if r[0] not in have]
+    if not new:
+        return 0
+    return db.execute_many("""
+        INSERT INTO macro_series
+            (id, name, units, frequency, category, source, source_id,
+             dashboard, active)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, new)
+
+
 def set_dashboard(series_id: str, on: bool) -> int:
     return db.execute("UPDATE macro_series SET dashboard = ? WHERE id = ?",
                       (1 if on else 0, series_id))
@@ -109,15 +133,22 @@ def observations(series_id: str, start: str = None) -> pd.DataFrame:
 
     The column is named value whichever table it came from, so callers do not
     have to know which - the routing is the repo's problem, not theirs.
+
+    source_id is only a key into prices. In macro_observations a series is
+    always stored under its own id - the FRED, BoE and CNN importers all save
+    that way - while source_id holds the code asked of the source (a BoE code
+    like IUDMNPY, a CNN JSON key). Reading by source_id there found nothing
+    for any series whose two differ.
     """
     source, key = _backing(series_id)
 
     if source == YAHOO:
         sql = "SELECT date, close AS value FROM prices WHERE fund_id = ?"
+        params = [key]
     else:
         sql = ("SELECT date, value FROM macro_observations "
                "WHERE series_id = ?")
-    params = [key]
+        params = [series_id]
     if start:
         sql += " AND date >= ?"
         params.append(start)
@@ -216,7 +247,9 @@ def range_stats(series_id: str, days: int = 365) -> dict:
         if source == YAHOO:
             table, key, col = "prices", "fund_id", "close"
         else:
+            # Stored under its own id, not source_id: see observations().
             table, key, col = "macro_observations", "series_id", "value"
+            ident = series_id
 
     df = db.query(f"""
         SELECT MIN({col}) AS lo, MAX({col}) AS hi FROM {table}
