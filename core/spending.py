@@ -266,6 +266,80 @@ def guess_card(new: pd.DataFrame, existing: pd.DataFrame):
     return best, best_n
 
 
+# --- Rule preview -------------------------------------------------------------------
+
+def preview_rule(txns: pd.DataFrame, rules: pd.DataFrame, keyword: str,
+                 category: str, subcategory: str, priority: int | None = None,
+                 rule_id: int | None = None) -> dict:
+    """Which stored lines a rule, as typed in the form, would place.
+
+    txns: stored rows (id, description, category, subcategory, status, ...).
+    rules: the rule table (id, keyword, category, subcategory, priority).
+    rule_id: the rule being edited, which the form replaces; None for a new
+    rule. A blank priority keeps the edited rule's place, or puts a new rule
+    at the end - the same as saving would.
+
+    A line counts only where this rule would be the first to match: an
+    earlier rule containing the same text, or the manual queue, still wins.
+    Returns
+        matched   the lines this rule places, with 'state' = same (already
+                  this category, confirmed) / pending / differs
+        beaten    {rule keyword or MANUAL: lines} that contain the keyword
+                  but go to something earlier"""
+    kw = (keyword or "").upper()
+    empty = txns.iloc[0:0].assign(state=[])
+    if not kw.strip():
+        return {"matched": empty, "beaten": {}}
+    others = rules[rules["id"] != rule_id] if rule_id is not None else rules
+    if priority is None:
+        own = rules.loc[rules["id"] == rule_id, "priority"] \
+            if rule_id is not None else []
+        priority = (int(own.iloc[0]) if len(own) else
+                    int(rules["priority"].max()) + 1 if len(rules) else 1)
+    order = [(int(p), int(i), k, c, s) for p, i, k, c, s in zip(
+        others["priority"], others["id"], others["keyword"],
+        others["category"], others["subcategory"])]
+    order.append((int(priority), rule_id if rule_id is not None
+                  else 10 ** 12, kw, category, subcategory))
+    order.sort(key=lambda r: (r[0], r[1]))
+    tuples = [(k, c, s) for _, _, k, c, s in order]
+
+    hits = txns[txns["description"].str.upper().str.contains(kw, regex=False)]
+    keep, beaten = [], {}
+    for i, d in zip(hits.index, hits["description"]):
+        m = classify(d, tuples)
+        if m.rule == kw:
+            keep.append(i)
+        else:
+            beaten[m.rule] = beaten.get(m.rule, 0) + 1
+    matched = hits.loc[keep].copy()
+    same = ((matched["category"] == category)
+            & (matched["subcategory"] == subcategory)
+            & (matched["status"] == "confirmed"))
+    matched["state"] = ["same" if s else "pending" if st == "pending"
+                        else "differs"
+                        for s, st in zip(same, matched["status"])]
+    return {"matched": matched, "beaten": beaten}
+
+
+# --- Card coverage ----------------------------------------------------------------
+
+def gaps(dates, min_days: int) -> list[tuple[str, str, int]]:
+    """Stretches with no transactions on a card: (first empty day, last
+    empty day, days) wherever two consecutive posting dates are more than
+    min_days apart. A card used most days that goes quiet for a fortnight
+    is usually a file that was never imported - the Sep 2026 credit-card
+    statement was one."""
+    days = sorted({pd.Timestamp(d) for d in dates})
+    out = []
+    for a, b in zip(days, days[1:]):
+        if (b - a).days > min_days:
+            first, last = a + pd.Timedelta(days=1), b - pd.Timedelta(days=1)
+            out.append((first.strftime("%Y-%m-%d"), last.strftime("%Y-%m-%d"),
+                        (b - a).days - 1))
+    return out
+
+
 # --- Overview --------------------------------------------------------------
 
 MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",

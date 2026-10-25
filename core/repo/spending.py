@@ -477,6 +477,31 @@ def import_rows(card: str, filename: str, rows: list[dict],
     return {"import_id": import_id, "inserted": inserted, "skipped": skipped}
 
 
+def posting_dates(since: str) -> pd.DataFrame:
+    """Distinct posting dates per card from `since`: card, date."""
+    ensure_tables()
+    return db.query("SELECT DISTINCT card, date FROM spend_transactions "
+                    "WHERE date >= ? ORDER BY card, date", (since,))
+
+
+def last_imports() -> pd.DataFrame:
+    """The latest import of each card: card, filename, imported_at."""
+    ensure_tables()
+    return db.query("""
+        SELECT i.card, i.filename, i.imported_at FROM spend_imports i
+        JOIN (SELECT card, MAX(id) AS id FROM spend_imports GROUP BY card) l
+          ON l.id = i.id
+    """)
+
+
+def card_rows_between(card: str, date_from: str, date_to: str) -> pd.DataFrame:
+    """A card's stored rows over a posting-date range, for reconciling."""
+    ensure_tables()
+    return db.query(f"SELECT {TXN_COLS} FROM spend_transactions "
+                    "WHERE card = ? AND date >= ? AND date <= ? "
+                    "ORDER BY date, id", (card, date_from, date_to))
+
+
 def imports(limit: int = 20) -> pd.DataFrame:
     ensure_tables()
     return db.query("""

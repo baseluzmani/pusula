@@ -7,6 +7,11 @@ Four small tools, as on the 8052 Rules page plus cards:
                  whose keyword appears in the description wins, lowest
                  priority number first. Click a rule to edit it; a blank
                  priority puts a new rule at the end of the list.
+                 Below the form, the stored lines the rule (as typed) would
+                 place - and the lines an earlier rule takes instead - with
+                 buttons to apply it to pending lines or to every line it
+                 would place differently. Applying changes stored lines;
+                 Save rule is what makes it apply to future imports.
     Categories   add or remove categories and sub-categories. Removing one
                  does not change stored transactions - re-map them first.
     Re-map       move every transaction in one category / sub-category to
@@ -20,11 +25,12 @@ from __future__ import annotations
 from dash import (html, dcc, dash_table, callback, Input, Output, State, ctx,
                   ALL, no_update)
 
-from core import theme
+from core import theme, spending as sp
 from core.repo import spending as repo
 from ui.layout import card
 from ui.spend import (TABLE, btn, field, bar, header, message, INPUT, NOTE,
-                      category_options, register_subcategories)
+                      category_options, register_subcategories, gbp,
+                      money_cells)
 
 P = "sp-ru"
 DROP = {"fontSize": "12.5px"}
@@ -60,7 +66,7 @@ def render():
                       "textAlign": "right", "fontFamily": theme.FONT_NUM}],
                  **TABLE), style={"margin": "12px 0"}),
              bar(field("Keyword", dcc.Input(
-                     id=f"{P}-kw", type="text", debounce=False,
+                     id=f"{P}-kw", type="text", debounce=True,
                      placeholder="e.g. NETFLIX",
                      style={**INPUT, "width": "220px",
                             "fontFamily": theme.FONT_NUM})),
@@ -80,7 +86,35 @@ def render():
                              style=btn()),
                  html.Button("New", id=f"{P}-new", n_clicks=0, style=btn())),
              html.Div(id=f"{P}-msg", style={"marginTop": "8px",
-                                            "minHeight": "16px"})),
+                                            "minHeight": "16px"}),
+             html.Div([
+                 html.Div(id=f"{P}-pv-summary", style={**NOTE,
+                          "color": theme.TEXT}),
+                 bar(html.Button("Apply to pending", id=f"{P}-pv-pending",
+                                 n_clicks=0, style=btn()),
+                     html.Button("Apply to all it would change",
+                                 id=f"{P}-pv-all", n_clicks=0, style=btn()),
+                     html.Span(id=f"{P}-pv-msg"), style={"margin": "10px 0"}),
+                 dash_table.DataTable(
+                     id=f"{P}-pv-table", data=[], page_action="native",
+                     page_size=15, sort_action="native",
+                     columns=[{"name": "Date", "id": "date"},
+                              {"name": "Card", "id": "card"},
+                              {"name": "Description", "id": "description"},
+                              {"name": "Amount", "id": "amount_fmt"},
+                              {"name": "Now", "id": "now"},
+                              {"name": "", "id": "state"}],
+                     style_cell_conditional=money_cells("amount_fmt"),
+                     style_data_conditional=[
+                         {"if": {"filter_query": '{state} = "pending"'},
+                          "backgroundColor": theme.TINT_NEAR},
+                         {"if": {"filter_query": '{state} = "differs"',
+                                 "column_id": "now"},
+                          "color": theme.NEGATIVE, "fontWeight": 600}],
+                     **TABLE),
+             ], id=f"{P}-pv", style={"display": "none", "marginTop": "14px",
+                                     "paddingTop": "14px",
+                                     "borderTop": f"1px solid {theme.LINE}"})),
 
         card("Categories",
              bar(field("Category", dcc.Dropdown(
@@ -156,6 +190,7 @@ def render():
                                              "minHeight": "16px"})),
 
         dcc.Store(id=f"{P}-refresh", data=0),
+        dcc.Store(id=f"{P}-pv-refresh", data=0),
     ])
 
 
@@ -431,3 +466,90 @@ def _card_actions(_r, _t, _a, selected, data, rname, newcard, refresh):
     repo.set_card_active(name, not retire)
     return (message(f"{name} {'retired - hidden from Import' if retire else 'restored'}."),
             bump, no_update, no_update)
+
+
+# --- Rule preview --------------------------------------------------------------
+
+def _preview(selected, kw, cat, sub, pri):
+    pri = int(pri) if pri not in (None, "") else None
+    return sp.preview_rule(repo.transactions(), repo.rules(), kw, cat, sub,
+                           pri, selected[0] if selected else None)
+
+
+@callback(
+    Output(f"{P}-pv", "style"),
+    Output(f"{P}-pv-summary", "children"),
+    Output(f"{P}-pv-table", "data"),
+    Output(f"{P}-pv-pending", "children"),
+    Output(f"{P}-pv-all", "children"),
+    Input(f"{P}-kw", "value"),
+    Input(f"{P}-cat", "value"),
+    Input(f"{P}-sub", "value"),
+    Input(f"{P}-pri", "value"),
+    Input(f"{P}-pv-refresh", "data"),
+    Input(f"{P}-refresh", "data"),
+    State(f"{P}-table", "selected_row_ids"),
+    State(f"{P}-pv", "style"),
+)
+def _show_preview(kw, cat, sub, pri, _r1, _r2, selected, style):
+    hide = {**(style or {}), "display": "none"}
+    if not (kw or "").strip() or not (cat and sub):
+        return hide, "", [], "Apply to pending", "Apply to all it would change"
+    res = _preview(selected, kw, cat, sub, pri)
+    m, beaten = res["matched"], res["beaten"]
+    n = {k: int((m["state"] == k).sum()) for k in ("same", "pending",
+                                                   "differs")}
+    word = kw.strip().upper()
+    lines = [f"'{word}' would place {len(m):,} stored line"
+             f"{'s' * (len(m) != 1)}: {n['same']:,} already {cat} / {sub}, "
+             f"{n['differs']:,} in other categories, {n['pending']:,} "
+             "pending in the Manual Queue."]
+    if beaten:
+        top = sorted(beaten.items(), key=lambda kv: -kv[1])[:4]
+        lines.append(f"{sum(beaten.values()):,} more contain it but go to an "
+                     "earlier rule: " + ", ".join(
+                         f"{'manual queue' if k == sp.MANUAL else k} ({v})"
+                         for k, v in top) + ".")
+    m = m.assign(_o=m["state"].map({"pending": 0, "differs": 1, "same": 2}))
+    m = m.sort_values(["_o", "date"], ascending=[True, False]).head(500)
+    data = [{"date": r["date"], "card": r["card"],
+             "description": r["description"],
+             "amount_fmt": gbp(r["amount"]),
+             "now": (f"{r['category']} / {r['subcategory']}"
+                     if r["category"] else "\u2014"),
+             "state": {"same": "", "pending": "pending",
+                       "differs": "differs"}[r["state"]]}
+            for r in m.to_dict("records")]
+    return ({**(style or {}), "display": "block"},
+            [html.Div(x) for x in lines], data,
+            f"Apply to pending ({n['pending']})",
+            f"Apply to all it would change ({n['pending'] + n['differs']})")
+
+
+@callback(
+    Output(f"{P}-pv-msg", "children"),
+    Output(f"{P}-pv-refresh", "data"),
+    Input(f"{P}-pv-pending", "n_clicks"),
+    Input(f"{P}-pv-all", "n_clicks"),
+    State(f"{P}-table", "selected_row_ids"),
+    State(f"{P}-kw", "value"),
+    State(f"{P}-cat", "value"),
+    State(f"{P}-sub", "value"),
+    State(f"{P}-pri", "value"),
+    State(f"{P}-pv-refresh", "data"),
+    prevent_initial_call=True,
+)
+def _apply_preview(_p, _a, selected, kw, cat, sub, pri, refresh):
+    if not ((kw or "").strip() and cat and sub):
+        return message("Fill in the keyword, category and sub-category.",
+                       ok=False), no_update
+    m = _preview(selected, kw, cat, sub, pri)["matched"]
+    want = ["pending"] if ctx.triggered_id == f"{P}-pv-pending" \
+        else ["pending", "differs"]
+    ids = m.loc[m["state"].isin(want), "id"].tolist()
+    if not ids:
+        return message("Nothing to change."), no_update
+    n = repo.assign(ids, cat, sub)
+    return (message(f"Set {n} stored line{'s' * (n != 1)} to {cat} / {sub}. "
+                    "Save rule too, if future imports should do the same."),
+            (refresh or 0) + 1)

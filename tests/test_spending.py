@@ -297,3 +297,55 @@ def test_migration_signs_amounts_and_merges_burcu_card(tmp_path):
                      ).fetchall()[1:] == [("burcu_debit_1.csv",),
                                           ("credit_1.csv",)]
     assert run("--apply").returncode == 1          # refuses a second copy
+
+
+# --- pass 2: coverage and rule preview --------------------------------------------
+
+def test_gaps_finds_quiet_stretches():
+    dates = ["2026-09-05", "2026-09-07", "2026-10-08", "2026-10-09",
+             "2026-10-09"]
+    assert sp.gaps(dates, 10) == [("2026-09-08", "2026-10-07", 30)]
+    assert sp.gaps(dates, 40) == []
+    assert sp.gaps([], 10) == []
+
+
+RULE_TABLE = pd.DataFrame([
+    (1, "UBER", "Transport", "Taxi", 43),
+    (2, "UBER   *EATS", "Food & Drink", "Restaurant", 88),
+    (3, "TESCO", "Groceries", "Tesco", 50)],
+    columns=["id", "keyword", "category", "subcategory", "priority"])
+
+TXNS = pd.DataFrame([
+    (10, "UBER   *EATS           HELP.UBER.COM ENG", "Transport", "Taxi",
+     "confirmed"),
+    (11, "UBER   *EATS           HELP.UBER.COM ENG", "Food & Drink",
+     "Restaurant", "confirmed"),
+    (12, "UBER   *TRIP           HELP.UBER.COM ENG", "Transport", "Taxi",
+     "confirmed"),
+    (13, "KFC                    ELTHAM        ENG", None, None, "pending"),
+    (14, "AMAZON UBER GIFT", None, None, "pending")],
+    columns=["id", "description", "category", "subcategory", "status"])
+
+
+def test_preview_shows_an_earlier_rule_winning():
+    # Editing the Eats rule in place: UBER (43) still comes first.
+    res = sp.preview_rule(TXNS, RULE_TABLE, "UBER   *EATS", "Food & Drink",
+                          "Restaurant", rule_id=2)
+    assert res["matched"].empty
+    assert res["beaten"] == {"UBER": 2}
+
+
+def test_preview_with_a_priority_that_wins():
+    res = sp.preview_rule(TXNS, RULE_TABLE, "UBER   *EATS", "Food & Drink",
+                          "Restaurant", priority=42, rule_id=2)
+    m = res["matched"].set_index("id")["state"].to_dict()
+    assert m == {10: "differs", 11: "same"}
+
+
+def test_preview_new_rule_goes_last_and_never_takes_manual_lines():
+    res = sp.preview_rule(TXNS, RULE_TABLE, "kfc", "Food & Drink",
+                          "Restaurant")
+    assert res["matched"].set_index("id")["state"].to_dict() == \
+        {13: "pending"}
+    gift = sp.preview_rule(TXNS, RULE_TABLE, "GIFT", "Shopping", "Home")
+    assert gift["matched"].empty and gift["beaten"] == {sp.MANUAL: 1}
