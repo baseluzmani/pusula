@@ -18,6 +18,9 @@ Four small tools, as on the 8052 Rules page plus cards:
                  another.
     Cards        rename a card (its history moves with it), retire one you no
                  longer use (hidden from the Import dropdown), or add one.
+                 A card's currency is what its statements are in; it is set
+                 when the card is added (a lira card's lines are converted to
+                 pounds on import).
 """
 
 from __future__ import annotations
@@ -34,6 +37,8 @@ from ui.spend import (TABLE, btn, field, bar, header, message, INPUT, NOTE,
 
 P = "sp-ru"
 DROP = {"fontSize": "12.5px"}
+# What a statement can be in: HSBC UK exports and statements, HSBC Turkiye.
+CURRENCIES = ["GBP", "TRY"]
 
 
 def render():
@@ -166,6 +171,7 @@ def render():
                  id=f"{P}-cards", data=[], row_selectable="single",
                  selected_row_ids=[],
                  columns=[{"name": "Card", "id": "name"},
+                          {"name": "Currency", "id": "currency"},
                           {"name": "In use", "id": "in_use"},
                           {"name": "Rows", "id": "rows"},
                           {"name": "First", "id": "first_date"},
@@ -184,6 +190,9 @@ def render():
                  field("New card", dcc.Input(
                      id=f"{P}-newcard", type="text", debounce=False,
                      style={**INPUT, "width": "160px"})),
+                 field("Currency", dcc.Dropdown(
+                     id=f"{P}-newccy", options=CURRENCIES, value="GBP",
+                     clearable=False, style=DROP), width="90px"),
                  html.Button("Add card", id=f"{P}-addcard", n_clicks=0,
                              style=btn())),
              html.Div(id=f"{P}-kmsg", style={"marginTop": "8px",
@@ -422,6 +431,7 @@ def _remap(old_cat, old_sub, new_cat, new_sub, _go):
 def _cards(_r):
     df = repo.card_summary()
     return [{"id": r["name"], "name": r["name"],
+             "currency": r["currency"] or "GBP",
              "in_use": "Yes" if r["active"] else "Retired",
              "rows": f"{int(r['rows']):,}", "first_date": r["first_date"] or "",
              "last_date": r["last_date"] or ""}
@@ -440,17 +450,19 @@ def _cards(_r):
     State(f"{P}-cards", "data"),
     State(f"{P}-rname", "value"),
     State(f"{P}-newcard", "value"),
+    State(f"{P}-newccy", "value"),
     State(f"{P}-refresh", "data"),
     prevent_initial_call=True,
 )
-def _card_actions(_r, _t, _a, selected, data, rname, newcard, refresh):
+def _card_actions(_r, _t, _a, selected, data, rname, newcard, ccy, refresh):
     trig = ctx.triggered_id
     bump = (refresh or 0) + 1
     if trig == f"{P}-addcard":
-        problem = repo.add_card(newcard)
+        problem = repo.add_card(newcard, ccy or "GBP")
         if problem:
             return message(problem, ok=False), no_update, no_update, no_update
-        return message(f"Added {newcard.strip()}."), bump, no_update, ""
+        return (message(f"Added {newcard.strip()} ({ccy or 'GBP'})."), bump,
+                no_update, "")
     if not selected:
         return (message("Tick a card first.", ok=False), no_update,
                 no_update, no_update)

@@ -4,12 +4,16 @@ Spending -> Transactions.
 Every stored bank line, filtered. Tick rows to change their category (with
 Remember for a merchant that recurs), or send them back to the Manual Queue.
 Export downloads exactly what the filters show.
+
+Amounts are in pounds. A line from a card in another currency also shows
+what the statement said, under Original.
 """
 
 from __future__ import annotations
 
 from datetime import date
 
+import pandas as pd
 from dash import (html, dcc, dash_table, callback, Input, Output, State, ctx,
                   no_update)
 
@@ -26,6 +30,7 @@ COLUMNS = [
     {"name": "Card", "id": "card"},
     {"name": "Description", "id": "description"},
     {"name": "Amount", "id": "amount_fmt"},
+    {"name": "Original", "id": "orig_fmt"},
     {"name": "Category", "id": "category"},
     {"name": "Sub-category", "id": "subcategory"},
     {"name": "Status", "id": "status"},
@@ -98,9 +103,10 @@ def render():
                 id=f"{P}-table", columns=COLUMNS, data=[],
                 row_selectable="multi", selected_row_ids=[],
                 sort_action="native", page_action="native", page_size=100,
-                style_cell_conditional=money_cells("amount_fmt") + [
+                style_cell_conditional=money_cells("amount_fmt", "orig_fmt") + [
                     {"if": {"column_id": "description"}, "width": "36%"}],
                 style_data_conditional=[
+                    {"if": {"column_id": "orig_fmt"}, "color": theme.SLATE},
                     {"if": {"filter_query": "{status} = pending"},
                      "backgroundColor": theme.TINT_NEAR}],
                 **TABLE),
@@ -146,6 +152,13 @@ FILTERS = [Input(f"{P}-from", "date"), Input(f"{P}-to", "date"),
            Input(f"{P}-type", "value"), Input(f"{P}-search", "value")]
 
 
+def _original(r) -> str:
+    """'(1,025.70) TRY' for a line converted from another currency."""
+    if pd.isna(r.get("amount_orig")) or not r.get("currency"):
+        return ""
+    return f"{gbp(r['amount_orig'])} {r['currency']}"
+
+
 @callback(
     Output(f"{P}-table", "data"),
     Output(f"{P}-info", "children"),
@@ -159,6 +172,7 @@ def _load(date_from, date_to, card, cat, sub, status, kind, search, _r):
     data = [{"id": int(r["id"]), "date": r["date"], "card": r["card"],
              "description": r["description"],
              "amount_fmt": gbp(r["amount"]),
+             "orig_fmt": _original(r),
              "category": r["category"] or "", "subcategory":
              r["subcategory"] or "", "status": r["status"]}
             for r in df.to_dict("records")]

@@ -3,6 +3,7 @@ Spending tables. All the SQL for the Spending section lives here.
 
     spend_cards          cards you import from. active = 0 hides a card from
                          the Import dropdown without touching its history.
+                         currency is what its statements are in (GBP, TRY).
     spend_categories     categories, in display order
     spend_subcategories  sub-categories per category
     spend_rules          keyword rules: a keyword found anywhere in a
@@ -11,9 +12,13 @@ Spending tables. All the SQL for the Spending section lives here.
                          priorities in the order they were added.
     spend_imports        one row per uploaded file
     spend_transactions   one row per bank line. amount is signed as in the
-                         bank file (spending negative). date is the posting
-                         date. status is 'confirmed' or 'pending' - pending
-                         rows are the Manual Queue.
+                         bank file (spending negative) and always in pounds.
+                         For a card in another currency, amount_orig and
+                         currency keep what the statement said (lira), and
+                         amount is converted at that day's rate on import.
+                         date is the posting date where the bank gives one.
+                         status is 'confirmed' or 'pending' - pending rows
+                         are the Manual Queue.
 
 Tables are created on first use. scripts/migrate_spending.py fills them from
 the old 8052 database once.
@@ -32,7 +37,8 @@ CREATE TABLE IF NOT EXISTS spend_cards (
     name        TEXT PRIMARY KEY,
     sort_order  INTEGER NOT NULL DEFAULT 99,
     active      INTEGER NOT NULL DEFAULT 1,
-    created_at  TEXT
+    created_at  TEXT,
+    currency    TEXT NOT NULL DEFAULT 'GBP'
 );
 CREATE TABLE IF NOT EXISTS spend_categories (
     name        TEXT PRIMARY KEY,
@@ -73,7 +79,9 @@ CREATE TABLE IF NOT EXISTS spend_transactions (
     status      TEXT NOT NULL DEFAULT 'confirmed',
     import_id   INTEGER,
     created_at  TEXT,
-    updated_at  TEXT
+    updated_at  TEXT,
+    currency    TEXT,
+    amount_orig REAL
 );
 CREATE INDEX IF NOT EXISTS idx_spend_txn_date   ON spend_transactions(date);
 CREATE INDEX IF NOT EXISTS idx_spend_txn_card   ON spend_transactions(card, date);
@@ -81,7 +89,13 @@ CREATE INDEX IF NOT EXISTS idx_spend_txn_status ON spend_transactions(status);
 """
 
 TXN_COLS = ("id, date, card, description, amount, category, subcategory, "
-            "status, import_id")
+            "status, import_id, currency, amount_orig")
+
+# Columns added after the first release, created on existing databases.
+LATER_COLUMNS = {
+    "spend_cards": [("currency", "TEXT NOT NULL DEFAULT 'GBP'")],
+    "spend_transactions": [("currency", "TEXT"), ("amount_orig", "REAL")],
+}
 
 
 def _now() -> str:
@@ -91,6 +105,11 @@ def _now() -> str:
 def ensure_tables() -> None:
     with db.get_conn() as conn:
         conn.executescript(SCHEMA)
+        for table, cols in LATER_COLUMNS.items():
+            have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for name, decl in cols:
+                if name not in have:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 def _placeholders(items) -> str:
@@ -101,7 +120,7 @@ def _placeholders(items) -> str:
 
 def cards(active_only: bool = False) -> pd.DataFrame:
     ensure_tables()
-    sql = "SELECT name, sort_order, active FROM spend_cards"
+    sql = "SELECT name, sort_order, active, currency FROM spend_cards"
     if active_only:
         sql += " WHERE active = 1"
     return db.query(sql + " ORDER BY sort_order, name")
@@ -111,11 +130,27 @@ def card_names(active_only: bool = True) -> list[str]:
     return cards(active_only)["name"].tolist()
 
 
+def card_currency(name: str) -> str:
+    df = cards()
+    hit = df.loc[df["name"] == name, "currency"]
+    return hit.iloc[0] if len(hit) and hit.iloc[0] else "GBP"
+
+
+def cards_in(currency: str, active_only: bool = True) -> list[str]:
+    df = cards(active_only)
+    return df.loc[df["currency"] == currency, "name"].tolist()
+
+
+def set_card_currency(name: str, currency: str) -> None:
+    db.execute("UPDATE spend_cards SET currency = ? WHERE name = ?",
+               (currency.upper(), name))
+
+
 def card_summary() -> pd.DataFrame:
     """Every card with its row count and first / last posting date."""
     ensure_tables()
     return db.query("""
-        SELECT c.name, c.active,
+        SELECT c.name, c.active, c.currency,
                COUNT(t.id) AS rows, MIN(t.date) AS first_date,
                MAX(t.date) AS last_date
         FROM spend_cards c LEFT JOIN spend_transactions t ON t.card = c.name
@@ -123,7 +158,7 @@ def card_summary() -> pd.DataFrame:
     """)
 
 
-def add_card(name: str) -> str | None:
+def add_card(name: str, currency: str = "GBP") -> str | None:
     """Returns an error message, or None when added."""
     name = (name or "").strip()
     if not name:
@@ -132,10 +167,10 @@ def add_card(name: str) -> str | None:
     if name.lower() in {n.lower() for n in card_names(active_only=False)}:
         return f"{name} already exists."
     db.execute("""
-        INSERT INTO spend_cards (name, sort_order, active, created_at)
+        INSERT INTO spend_cards (name, sort_order, active, created_at, currency)
         VALUES (?, (SELECT COALESCE(MAX(sort_order), 0) + 1 FROM spend_cards),
-                1, ?)
-    """, (name, _now()))
+                1, ?, ?)
+    """, (name, _now(), (currency or "GBP").upper()))
     return None
 
 
@@ -387,9 +422,12 @@ def counts() -> dict:
 
 def existing_between(date_from: str, date_to: str,
                      card: str | None = None) -> pd.DataFrame:
-    """Stored rows over a date range: card, date, description, amount."""
+    """Stored rows over a date range: card, date, description, amount -
+    the amount as the bank printed it (lira for a lira card), which is what
+    an uploaded file is compared on."""
     ensure_tables()
-    sql = ("SELECT card, date, description, amount FROM spend_transactions "
+    sql = ("SELECT card, date, description, "
+           "COALESCE(amount_orig, amount) AS amount FROM spend_transactions "
            "WHERE date >= ? AND date <= ?")
     params: list = [date_from, date_to]
     if card:
@@ -431,18 +469,22 @@ def import_rows(card: str, filename: str, rows: list[dict],
                 rows_in_file: int) -> dict:
     """Store an uploaded file's chosen rows.
 
-    rows: dicts with date, description, amount, category, subcategory and
-    status. Counted de-duplication, as 8052 did it: a row is only skipped if
-    the database already holds as many identical rows (same card, date,
-    description and amount) as this batch brings - so two identical coffees
-    on one day both get in, and re-importing the same file adds nothing.
+    rows: dicts with date, description, amount (pounds), category,
+    subcategory and status, plus amount_orig and currency for a card in
+    another currency. Counted de-duplication, as 8052 did it: a row is only
+    skipped if the database already holds as many identical rows (same
+    card, date, description and amount as printed) as this batch brings -
+    so two identical coffees on one day both get in, and re-importing the
+    same file adds nothing.
 
     Returns {'import_id', 'inserted', 'skipped'}."""
     ensure_tables()
     now = _now()
     groups: dict = {}
     for r in rows:
-        k = (r["date"], r["description"], round(float(r["amount"]), 2))
+        printed = r.get("amount_orig")
+        printed = r["amount"] if printed is None else printed
+        k = (r["date"], r["description"], round(float(printed), 2))
         groups.setdefault(k, []).append(r)
 
     inserted = skipped = 0
@@ -458,18 +500,21 @@ def import_rows(card: str, filename: str, rows: list[dict],
             have = conn.execute("""
                 SELECT COUNT(*) FROM spend_transactions
                 WHERE card = ? AND date = ? AND description = ?
-                  AND ROUND(amount, 2) = ?
+                  AND ROUND(COALESCE(amount_orig, amount), 2) = ?
             """, (card, d, desc, amt)).fetchone()[0]
             for r in batch[have:]:
+                orig = r.get("amount_orig")
                 conn.execute("""
                     INSERT INTO spend_transactions
                         (date, card, description, amount, category,
                          subcategory, status, import_id, created_at,
-                         updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, (d, card, desc, amt, r.get("category"),
-                      r.get("subcategory"), r.get("status", "confirmed"),
-                      import_id, now, now))
+                         updated_at, currency, amount_orig)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (d, card, desc, round(float(r["amount"]), 2),
+                      r.get("category"), r.get("subcategory"),
+                      r.get("status", "confirmed"), import_id, now, now,
+                      r.get("currency") if orig is not None else None,
+                      None if orig is None else round(float(orig), 2)))
                 inserted += 1
             skipped += min(have, len(batch))
         conn.execute("UPDATE spend_imports SET inserted = ?, skipped = ? "
@@ -500,6 +545,26 @@ def card_rows_between(card: str, date_from: str, date_to: str) -> pd.DataFrame:
     return db.query(f"SELECT {TXN_COLS} FROM spend_transactions "
                     "WHERE card = ? AND date >= ? AND date <= ? "
                     "ORDER BY date, id", (card, date_from, date_to))
+
+
+def gbp_rates(currency: str) -> pd.DataFrame:
+    """Daily units of `currency` per pound - date, rate - from the prices
+    the portfolio already keeps (YF:GBPTRY=X for lira)."""
+    return db.query("SELECT date, close AS rate FROM prices "
+                    "WHERE fund_id = ? AND close > 0 ORDER BY date",
+                    (f"YF:GBP{currency.upper()}=X",))
+
+
+def delete_card_rows(card: str) -> dict:
+    """Remove every transaction and import record of a card (the card
+    itself stays). Returns how many of each went."""
+    ensure_tables()
+    with db.get_conn() as conn:
+        t = conn.execute("DELETE FROM spend_transactions WHERE card = ?",
+                         (card,)).rowcount
+        i = conn.execute("DELETE FROM spend_imports WHERE card = ?",
+                         (card,)).rowcount
+    return {"transactions": t, "imports": i}
 
 
 def imports(limit: int = 20) -> pd.DataFrame:

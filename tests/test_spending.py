@@ -349,3 +349,174 @@ def test_preview_new_rule_goes_last_and_never_takes_manual_lines():
         {13: "pending"}
     gift = sp.preview_rule(TXNS, RULE_TABLE, "GIFT", "Shopping", "Home")
     assert gift["matched"].empty and gift["beaten"] == {sp.MANUAL: 1}
+
+
+
+# --- pass 3: several files, other currencies ---------------------------------------
+
+def test_combine_files_counts_an_overlap_once_and_keeps_true_repeats():
+    a = frame([("2026-09-01", "COFFEE", -3.0), ("2026-09-01", "COFFEE", -3.0),
+               ("2026-09-02", "TESCO", -9.0)])
+    b = frame([("2026-09-01", "COFFEE", -3.0), ("2026-09-02", "TESCO", -9.0),
+               ("2026-09-03", "TFL", -2.8)])
+    got = sp.combine_files([a, b])
+    assert got.values.tolist() == [["2026-09-01", "COFFEE", -3.0],
+                                   ["2026-09-01", "COFFEE", -3.0],
+                                   ["2026-09-02", "TESCO", -9.0],
+                                   ["2026-09-03", "TFL", -2.8]]
+    assert sp.combine_files([]).empty
+
+
+RATES = pd.DataFrame({"date": ["2026-09-01", "2026-09-04", "2026-09-08"],
+                      "rate": [67.0, 68.0, 68.5]})
+
+
+def test_convert_to_gbp_takes_the_rate_on_or_before_each_day():
+    df = pd.DataFrame({"date": ["2026-09-05", "2026-09-01", "2026-09-06"],
+                       "description": ["A", "B", "C"],
+                       "amount": [-680.0, -10.0, 68.5]})
+    got = sp.convert_to_gbp(df, RATES)
+    assert got["gbp"].tolist() == [-10.0, -0.15, 1.01]
+    assert got["rate_date"].tolist() == ["2026-09-04", "2026-09-01",
+                                         "2026-09-04"]
+    assert got["amount"].tolist() == df["amount"].tolist()      # untouched
+
+
+def test_convert_to_gbp_keeps_a_pound_figure_the_bank_noted():
+    df = pd.DataFrame({"date": ["2026-09-09", "2026-09-09"],
+                       "description": ["UBER", "SHOP"],
+                       "amount": [-1192.24, -100.0],
+                       "note": ["17.52 GBP", None]})
+    assert sp.convert_to_gbp(df, RATES)["gbp"].tolist() == [-17.52, -1.46]
+
+
+def test_convert_to_gbp_refuses_rows_older_than_the_rates():
+    df = pd.DataFrame({"date": ["2026-08-31"], "description": ["A"],
+                       "amount": [-1.0]})
+    with pytest.raises(ValueError, match="2026-08-31"):
+        sp.convert_to_gbp(df, RATES)
+    with pytest.raises(ValueError):
+        sp.convert_to_gbp(df, RATES.iloc[0:0])
+
+
+def lira_rows(rate):
+    return [{"date": "2026-09-05", "description": "MIGROS", "amount":
+             round(-680.0 / rate, 2), "amount_orig": -680.0, "currency": "TRY",
+             "category": "Groceries", "subcategory": "Tesco",
+             "status": "confirmed"}]
+
+
+def test_lira_rows_dedupe_on_the_amount_the_statement_printed(repo):
+    repo.add_card("Turkey Card", "TRY")
+    assert repo.card_currency("Turkey Card") == "TRY"
+    assert repo.cards_in("TRY") == ["Turkey Card"]
+    first = repo.import_rows("Turkey Card", "e.pdf", lira_rows(68.0), 1)
+    # The same statement again after the rates were revised: still a repeat.
+    again = repo.import_rows("Turkey Card", "e.pdf", lira_rows(67.5), 1)
+    assert (first["inserted"], again["inserted"], again["skipped"]) == (1, 0, 1)
+    got = repo.transactions().iloc[0]
+    assert (got["amount"], got["amount_orig"], got["currency"]) == \
+        (-10.0, -680.0, "TRY")
+    seen = repo.existing_between("2026-09-01", "2026-09-30", "Turkey Card")
+    assert seen["amount"].tolist() == [-680.0]       # compared in lira
+    # Pound cards are unchanged: no original amount, no currency.
+    repo.import_rows("Credit Card", "a.csv",
+                     rows_(("2026-09-05", "TESCO", -4.0)), 1)
+    uk = repo.transactions()
+    uk = uk[uk["card"] == "Credit Card"].iloc[0]
+    assert pd.isna(uk["amount_orig"]) and pd.isna(uk["currency"])
+
+
+def test_gbp_rates_and_delete_card_rows(repo):
+    from core import db
+    db.execute("CREATE TABLE prices (fund_id TEXT, date TEXT, close REAL)")
+    db.execute("INSERT INTO prices VALUES ('YF:GBPTRY=X', '2026-09-02', 68.1),"
+               " ('YF:GBPTRY=X', '2026-09-01', 67.9), ('YF:GBPEUR=X', "
+               "'2026-09-01', 1.17)")
+    assert repo.gbp_rates("try").values.tolist() == [["2026-09-01", 67.9],
+                                                     ["2026-09-02", 68.1]]
+    repo.add_card("Turkey Card", "TRY")
+    repo.import_rows("Turkey Card", "e.pdf", lira_rows(68.0), 1)
+    assert repo.delete_card_rows("Turkey Card") == {"transactions": 1,
+                                                    "imports": 1}
+    assert "Turkey Card" in repo.card_names()
+
+
+def test_ensure_tables_adds_the_currency_columns_to_an_older_database(
+        tmp_path, monkeypatch):
+    path = tmp_path / "old.db"
+    c = sqlite3.connect(path)
+    c.executescript("""
+        CREATE TABLE spend_cards (name TEXT PRIMARY KEY, sort_order INTEGER
+            NOT NULL DEFAULT 99, active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT);
+        INSERT INTO spend_cards (name) VALUES ('Debit Card');
+        CREATE TABLE spend_transactions (id INTEGER PRIMARY KEY, date TEXT,
+            card TEXT, description TEXT, amount REAL, category TEXT,
+            subcategory TEXT, status TEXT, import_id INTEGER,
+            created_at TEXT, updated_at TEXT);
+    """)
+    c.close()
+    monkeypatch.setattr(config, "DB_PATH", path)
+    from core.repo import spending as r
+    r.ensure_tables()
+    r.ensure_tables()                                  # twice is harmless
+    assert r.card_currency("Debit Card") == "GBP"
+    cols = {x[1] for x in sqlite3.connect(path).execute(
+        "PRAGMA table_info(spend_transactions)")}
+    assert {"currency", "amount_orig"} <= cols
+
+
+def test_reset_turkey_card_script(tmp_path):
+    home = tmp_path / "home"
+    (home / "data").mkdir(parents=True)
+    db_path = home / "data" / "funds.db"
+    sys.path.insert(0, str(ROOT))
+    from core.repo import spending as r
+    c = sqlite3.connect(db_path)
+    c.executescript(r.SCHEMA)
+    c.executescript("""
+        INSERT INTO spend_cards (name, sort_order, active) VALUES
+            ('Debit Card', 0, 1), ('Turkey Card', 4, 0);
+        INSERT INTO spend_subcategories VALUES ('Food & Drink', 'Restaurant'),
+            ('Finance', 'Transfer');
+        INSERT INTO spend_rules (keyword, category, subcategory, priority)
+            VALUES ('UBER', 'Transport', 'Taxi', 43);
+        INSERT INTO spend_transactions (date, card, description, amount)
+            VALUES ('2025-11-21', 'Turkey Card', 'OLD LINE', -219.6),
+                   ('2026-01-02', 'Debit Card', 'TESCO', -5.0);
+        INSERT INTO spend_imports (card, filename) VALUES ('Turkey Card', 'x');
+    """)
+    c.commit()
+    c.close()
+    run = lambda *a: subprocess.run(                          # noqa: E731
+        [sys.executable, str(ROOT / "scripts" / "reset_turkey_card.py"), *a],
+        capture_output=True, text=True, env={"HOME": str(home), "PATH": ""})
+
+    dry = run()
+    assert dry.returncode == 0, dry.stdout + dry.stderr
+    assert "nothing written" in dry.stdout
+    t = sqlite3.connect(db_path)
+    assert t.execute("SELECT COUNT(*) FROM spend_transactions").fetchone()[0] == 2
+    assert t.execute("SELECT currency, active FROM spend_cards WHERE name = "
+                     "'Turkey Card'").fetchone() == ("GBP", 0)
+    assert t.execute("SELECT COUNT(*) FROM spend_rules").fetchone()[0] == 1
+    t.close()
+
+    done = run("--apply")
+    assert done.returncode == 0, done.stdout + done.stderr
+    t = sqlite3.connect(db_path)
+    assert t.execute("SELECT card FROM spend_transactions").fetchall() == \
+        [("Debit Card",)]
+    assert t.execute("SELECT COUNT(*) FROM spend_imports").fetchone()[0] == 0
+    assert t.execute("SELECT currency, active FROM spend_cards WHERE name = "
+                     "'Turkey Card'").fetchone() == ("TRY", 1)
+    rules = t.execute("SELECT keyword, priority FROM spend_rules "
+                      "ORDER BY priority, id").fetchall()
+    assert rules == [("UBERTRENDYOLGO", 42), ("UBER EATS/", 42),
+                     ("UBER", 43), ("HESAPTAN ÖDEME", 44)]
+    assert len(list((home / "data" / "backups").iterdir())) == 1
+    t.close()
+    assert run("--apply").returncode == 0            # again: nothing to do
+    t = sqlite3.connect(db_path)
+    assert t.execute("SELECT COUNT(*) FROM spend_rules").fetchone()[0] == 4

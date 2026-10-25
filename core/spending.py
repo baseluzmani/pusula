@@ -17,6 +17,11 @@ Amounts are signed the way the bank file has them: spending negative, refunds
 and income positive. Dates are the posting date, which is what HSBC's online
 export uses (the PDF statement also shows a transaction date, a day or two
 earlier - mixing the two is how the July rows were double-counted).
+
+Everything is stored in pounds. A card in another currency (the Turkish
+card, in lira) is converted on import at that day's rate from the prices the
+portfolio already keeps - convert_to_gbp - and the lira amount is kept beside
+it, which is what re-uploads are compared on.
 """
 
 from __future__ import annotations
@@ -179,6 +184,73 @@ def parse_bank_csv(raw: bytes) -> pd.DataFrame:
     df["date"] = df["date"].dt.strftime("%Y-%m-%d")
     df["amount"] = df["amount"].round(2)
     return df.reset_index(drop=True)[["date", "description", "amount"]]
+
+
+# --- Several files at once ---------------------------------------------------
+
+def combine_files(frames: list[pd.DataFrame]) -> pd.DataFrame:
+    """One set of rows from several files of the same card.
+
+    Two exports can overlap - each is a full view of its own dates - so a
+    row both carry is the same row, not two. For every date, description and
+    amount the result keeps as many copies as the file with the most of
+    them: a statement's two identical coffees stay two, and the same coffee
+    in two overlapping exports stays one. Rows keep the order of the files."""
+    frames = [f for f in frames if f is not None and not f.empty]
+    if not frames:
+        return pd.DataFrame(columns=["date", "description", "amount"])
+    df = pd.concat([f.assign(_file=i) for i, f in enumerate(frames)],
+                   ignore_index=True)
+    df["_amt"] = df["amount"].astype(float).round(2)
+    keys = ["date", "description", "_amt"]
+    df["_copy"] = df.groupby(["_file", *keys]).cumcount()
+    df = df.drop_duplicates(subset=[*keys, "_copy"])
+    return df.drop(columns=["_file", "_amt", "_copy"]).reset_index(drop=True)
+
+
+# --- Other currencies ---------------------------------------------------------
+
+_PAID_GBP = re.compile(r"^([\d,]+\.\d{2}) GBP$")
+
+
+def convert_to_gbp(df: pd.DataFrame, rates: pd.DataFrame) -> pd.DataFrame:
+    """Pounds for rows in another currency.
+
+    df: date, amount (as the statement prints it) and optionally note.
+    rates: date, rate - units of that currency per pound, one row a trading
+    day. Each row takes the latest rate on or before its date (a weekend
+    takes Friday's). A row the bank itself noted as paid in pounds ("17.52
+    GBP" - a London Uber on the lira card) takes that figure instead.
+
+    Returns df with gbp (rounded to the penny) and rate_date added. Raises
+    ValueError if a row is older than the first rate."""
+    out = df.copy()
+    if out.empty:
+        return out.assign(gbp=pd.Series(dtype=float),
+                          rate_date=pd.Series(dtype=str))
+    if rates is None or rates.empty:
+        raise ValueError("no exchange rates stored")
+    r = rates[["date", "rate"]].copy()
+    r["_d"] = pd.to_datetime(r["date"])
+    r = r.sort_values("_d").rename(columns={"date": "rate_date"})
+    out["_d"] = pd.to_datetime(out["date"])
+    out["_i"] = range(len(out))
+    m = pd.merge_asof(out.sort_values("_d"), r, on="_d", direction="backward")
+    m = m.sort_values("_i")
+    if m["rate"].isna().any():
+        first = m.loc[m["rate"].isna(), "date"].min()
+        raise ValueError(f"no exchange rate on or before {first}")
+    gbp = (m["amount"].astype(float) / m["rate"].astype(float)).round(2)
+    if "note" in m.columns:
+        paid = m["note"].fillna("").astype(str).str.strip().str.extract(
+            _PAID_GBP)[0]
+        paid = pd.to_numeric(paid.str.replace(",", "", regex=False),
+                             errors="coerce")
+        sign = m["amount"].astype(float).apply(lambda a: -1 if a < 0 else 1)
+        gbp = gbp.where(paid.isna(), (paid * sign).round(2))
+    out["gbp"] = gbp.to_numpy()
+    out["rate_date"] = m["rate_date"].to_numpy()
+    return out.drop(columns=["_d", "_i"])
 
 
 # --- Comparing a file with what is already stored ----------------------------
