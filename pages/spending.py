@@ -1,16 +1,25 @@
 import dash
 from dash import html, callback, Input, Output
 
-from ui.layout import page_header, subtabs, placeholder
+from ui.layout import page_header, subtabs
 from core import theme
-from pages import spending_allowances
+from pages import (spending_allowances, spending_overview,
+                   spending_transactions, spending_queue, spending_import,
+                   spending_rules)
 
 dash.register_page(__name__, path="/spending", name="Spending", order=3)
 
-TABS = ["Overview", "Categories", "Manual Queue", "Cards", "Allowances"]
+TABS = {
+    "Overview": spending_overview.render,
+    "Transactions": spending_transactions.render,
+    "Manual Queue": spending_queue.render,
+    "Import": spending_import.render,
+    "Rules": spending_rules.render,
+    "Allowances": spending_allowances.render,
+}
 
 layout = html.Div([
-    subtabs("sp-tabs", TABS),
+    subtabs("sp-tabs", list(TABS)),
     html.Div([
         page_header("Spending",
                     "Household outgoings by category, with a review queue for "
@@ -22,6 +31,10 @@ layout = html.Div([
 
 @callback(Output("sp-body", "children"), Input("sp-tabs", "value"))
 def render(tab):
-    if tab == "Allowances":
-        return spending_allowances.render()
-    return placeholder(f"{tab} - to be migrated from port 8052")
+    # A data problem shows inside the tab instead of blanking the page.
+    try:
+        return TABS.get(tab, spending_overview.render)()
+    except Exception as exc:                       # noqa: BLE001 - deliberate
+        return html.Div(f"{tab} could not load: {type(exc).__name__}: {exc}",
+                        style={**theme.CARD, "color": theme.NEGATIVE,
+                               "fontSize": "12.5px"})
