@@ -6,7 +6,10 @@ Four small tools, as on the 8052 Rules page plus cards:
     Rules        keyword -> category / sub-category. On import the first rule
                  whose keyword appears in the description wins, lowest
                  priority number first. Click a rule to edit it; a blank
-                 priority puts a new rule at the end of the list.
+                 priority puts a new rule at the end of the list. A rule can
+                 also carry an amount (exactly £x, or up to £x) - the only
+                 way to place Amazon, PayPal and cash lines - and a note
+                 copied onto the lines it places.
                  Below the form, the stored lines the rule (as typed) would
                  place - and the lines an earlier rule takes instead - with
                  buttons to apply it to pending lines or to every line it
@@ -16,8 +19,13 @@ Four small tools, as on the 8052 Rules page plus cards:
                  does not change stored transactions - re-map them first.
     Re-map       move every transaction in one category / sub-category to
                  another.
+    Templates    the split templates you have saved, and how often each was
+                 used; delete one you no longer want (lines split with it
+                 keep their parts).
     Cards        rename a card (its history moves with it), retire one you no
                  longer use (hidden from the Import dropdown), or add one.
+                 Statement accounts are the last four digits Import has
+                 learnt for each card.
                  A card's currency is what its statements are in; it is set
                  when the card is added (a lira card's lines are converted to
                  pounds on import).
@@ -25,6 +33,7 @@ Four small tools, as on the 8052 Rules page plus cards:
 
 from __future__ import annotations
 
+import pandas as pd
 from dash import (html, dcc, dash_table, callback, Input, Output, State, ctx,
                   ALL, no_update)
 
@@ -32,11 +41,14 @@ from core import theme, spending as sp
 from core.repo import spending as repo
 from ui.layout import card
 from ui.spend import (TABLE, btn, field, bar, header, message, INPUT, NOTE,
-                      category_options, register_subcategories, gbp,
+                      category_options, register_subcategories, money_col,
                       money_cells)
 
 P = "sp-ru"
 DROP = {"fontSize": "12.5px"}
+AMOUNT_KINDS = [{"label": "Any", "value": "any"},
+                {"label": "Exactly", "value": "exact"},
+                {"label": "Up to", "value": "max"}]
 # What a statement can be in: HSBC UK exports and statements, HSBC Turkiye.
 CURRENCIES = ["GBP", "TRY"]
 
@@ -60,15 +72,20 @@ def render():
                  id=f"{P}-table", data=[], row_selectable="single",
                  selected_row_ids=[], sort_action="native",
                  page_action="native", page_size=25,
-                 columns=[{"name": "Priority", "id": "priority"},
+                 columns=[{"name": "Priority", "id": "priority",
+                           "type": "numeric"},
                           {"name": "Keyword", "id": "keyword"},
+                          {"name": "Amount", "id": "amount_txt"},
                           {"name": "Category", "id": "category"},
-                          {"name": "Sub-category", "id": "subcategory"}],
+                          {"name": "Sub-category", "id": "subcategory"},
+                          {"name": "Note", "id": "note"}],
                  style_cell_conditional=[
                      {"if": {"column_id": "keyword"},
                       "fontFamily": theme.FONT_NUM, "whiteSpace": "pre"},
                      {"if": {"column_id": "priority"}, "width": "70px",
-                      "textAlign": "right", "fontFamily": theme.FONT_NUM}],
+                      "textAlign": "right", "fontFamily": theme.FONT_NUM},
+                     {"if": {"column_id": "amount_txt"},
+                      "fontFamily": theme.FONT_NUM}],
                  **TABLE), style={"margin": "12px 0"}),
              bar(field("Keyword", dcc.Input(
                      id=f"{P}-kw", type="text", debounce=True,
@@ -82,6 +99,16 @@ def render():
                                                     clearable=False,
                                                     style=DROP),
                        width="180px"),
+                 field("Amount", dcc.Dropdown(
+                     id=f"{P}-akind", options=AMOUNT_KINDS, value="any",
+                     clearable=False, style=DROP), width="110px"),
+                 field("£", dcc.Input(
+                     id=f"{P}-aval", type="number", debounce=False,
+                     placeholder="—", style={**INPUT, "width": "90px"})),
+                 field("Note", dcc.Input(
+                     id=f"{P}-rnote", type="text", debounce=False,
+                     placeholder="optional",
+                     style={**INPUT, "width": "140px"})),
                  field("Priority", dcc.Input(
                      id=f"{P}-pri", type="number", debounce=False,
                      placeholder="end", style={**INPUT, "width": "80px"})),
@@ -106,10 +133,10 @@ def render():
                      columns=[{"name": "Date", "id": "date"},
                               {"name": "Card", "id": "card"},
                               {"name": "Description", "id": "description"},
-                              {"name": "Amount", "id": "amount_fmt"},
+                              money_col("Amount", "amount"),
                               {"name": "Now", "id": "now"},
                               {"name": "", "id": "state"}],
-                     style_cell_conditional=money_cells("amount_fmt"),
+                     style_cell_conditional=money_cells("amount"),
                      style_data_conditional=[
                          {"if": {"filter_query": '{state} = "pending"'},
                           "backgroundColor": theme.TINT_NEAR},
@@ -166,12 +193,31 @@ def render():
              html.Div(id=f"{P}-mmsg", style={**NOTE, "marginTop": "8px",
                                              "minHeight": "16px"})),
 
+        card("Split templates",
+             html.Div(dash_table.DataTable(
+                 id=f"{P}-tpls", data=[], row_selectable="single",
+                 selected_row_ids=[],
+                 columns=[{"name": "Template", "id": "name"},
+                          {"name": "Parts", "id": "parts"},
+                          {"name": "Used", "id": "uses", "type": "numeric"}],
+                 style_cell_conditional=[{"if": {"column_id": "parts"},
+                                          "maxWidth": "620px"}],
+                 **TABLE), style={"marginBottom": "12px"}),
+             bar(html.Button("Delete template", id=f"{P}-tdel", n_clicks=0,
+                             style=btn()),
+                 html.Span("Make one from the Split… editor on Transactions, "
+                           "Statements or the Manual Queue.", style=NOTE),
+                 style={"alignItems": "center"}),
+             html.Div(id=f"{P}-tmsg", style={"marginTop": "8px",
+                                             "minHeight": "16px"})),
+
         card("Cards",
              html.Div(dash_table.DataTable(
                  id=f"{P}-cards", data=[], row_selectable="single",
                  selected_row_ids=[],
                  columns=[{"name": "Card", "id": "name"},
                           {"name": "Currency", "id": "currency"},
+                          {"name": "Statement accounts", "id": "refs"},
                           {"name": "In use", "id": "in_use"},
                           {"name": "Rows", "id": "rows"},
                           {"name": "First", "id": "first_date"},
@@ -222,7 +268,15 @@ def _rules(cat, search, _r):
         df = df[df["category"] == cat]
     if search:
         df = df[df["keyword"].str.contains(search.upper(), regex=False)]
-    return df.to_dict("records"), f"{len(df)} of {total} rules"
+    data = []
+    for r in df.to_dict("records"):
+        kind = r["amount_kind"] if isinstance(r["amount_kind"], str) else None
+        data.append({**r, "amount_kind": kind,
+                     "amount": None if pd.isna(r["amount"]) else r["amount"],
+                     "note": r["note"] if isinstance(r["note"], str) else "",
+                     "amount_txt": (f"{sp.AMOUNT_SIGNS[kind]} "
+                                    f"{r['amount']:,.2f}" if kind else "")})
+    return data, f"{len(df)} of {total} rules"
 
 
 @callback(
@@ -231,6 +285,9 @@ def _rules(cat, search, _r):
     Output(f"{P}-sub", "options", allow_duplicate=True),
     Output(f"{P}-sub", "value", allow_duplicate=True),
     Output(f"{P}-pri", "value"),
+    Output(f"{P}-akind", "value"),
+    Output(f"{P}-aval", "value"),
+    Output(f"{P}-rnote", "value"),
     Input(f"{P}-table", "selected_row_ids"),
     State(f"{P}-table", "data"),
     prevent_initial_call=True,
@@ -240,15 +297,16 @@ def _load_rule(selected, data):
     sub-category options are set here too - a dropdown drops a value that
     is not among its options."""
     if not selected:
-        return "", None, [], None, None
+        return "", None, [], None, None, "any", None, ""
     r = next((x for x in data or [] if x["id"] == selected[0]), None)
     if not r:
-        return (no_update,) * 5
+        return (no_update,) * 8
     subs = repo.categories().get(r["category"], [])
     if r["subcategory"] not in subs:
         subs = subs + [r["subcategory"]]
     return (r["keyword"], r["category"], subs, r["subcategory"],
-            r["priority"])
+            r["priority"], r["amount_kind"] or "any", r["amount"],
+            r["note"] or "")
 
 
 @callback(
@@ -272,10 +330,14 @@ def _new_rule(_n):
     State(f"{P}-cat", "value"),
     State(f"{P}-sub", "value"),
     State(f"{P}-pri", "value"),
+    State(f"{P}-akind", "value"),
+    State(f"{P}-aval", "value"),
+    State(f"{P}-rnote", "value"),
     State(f"{P}-refresh", "data"),
     prevent_initial_call=True,
 )
-def _save_rule(_s, _d, selected, kw, cat, sub, pri, refresh):
+def _save_rule(_s, _d, selected, kw, cat, sub, pri, akind, aval, note,
+               refresh):
     if ctx.triggered_id == f"{P}-delete":
         if not selected:
             return message("Click a rule first.", ok=False), no_update, \
@@ -288,16 +350,30 @@ def _save_rule(_s, _d, selected, kw, cat, sub, pri, refresh):
         return message("Pick a category and sub-category.", ok=False), \
             no_update, no_update
     pri = int(pri) if pri not in (None, "") else None
+    kind, value = _amount(akind, aval)
+    if kind and value is None:
+        return message("Type the amount, or set Amount to Any.",
+                       ok=False), no_update, no_update
     if selected:
         # Editing the clicked rule - keyword changes included.
-        problem = repo.update_rule(selected[0], kw, cat, sub, pri)
+        problem = repo.update_rule(selected[0], kw, cat, sub, pri, kind,
+                                   value, note)
         if problem:
             return message(problem, ok=False), no_update, no_update
-        saved = kw.upper()
+        saved = sp.rule_label(kw.upper().strip(), kind, value)
     else:
-        saved = repo.save_rule(kw, cat, sub, pri)
+        saved = repo.save_rule(kw, cat, sub, pri, kind, value, note)
     return (message(f"Saved: {saved.strip()} → {cat} / {sub}."),
             (refresh or 0) + 1, no_update)
+
+
+def _amount(akind, aval):
+    """The form's amount condition: (kind, pounds) or (None, None)."""
+    if akind not in ("exact", "max"):
+        return None, None
+    if aval in (None, ""):
+        return akind, None
+    return akind, round(abs(float(aval)), 2)
 
 
 # --- Categories ----------------------------------------------------------------
@@ -430,8 +506,11 @@ def _remap(old_cat, old_sub, new_cat, new_sub, _go):
 )
 def _cards(_r):
     df = repo.card_summary()
+    refs = repo.card_refs()
     return [{"id": r["name"], "name": r["name"],
              "currency": r["currency"] or "GBP",
+             "refs": ", ".join("••" + x.split(":")[-1]
+                               for x in refs.get(r["name"], [])),
              "in_use": "Yes" if r["active"] else "Retired",
              "rows": f"{int(r['rows']):,}", "first_date": r["first_date"] or "",
              "last_date": r["last_date"] or ""}
@@ -482,10 +561,18 @@ def _card_actions(_r, _t, _a, selected, data, rname, newcard, ccy, refresh):
 
 # --- Rule preview --------------------------------------------------------------
 
-def _preview(selected, kw, cat, sub, pri):
+def _preview(selected, kw, cat, sub, pri, akind=None, aval=None):
+    """The rule as typed, against every stored line - split lines left
+    out: applying a category would undo their split."""
     pri = int(pri) if pri not in (None, "") else None
-    return sp.preview_rule(repo.transactions(), repo.rules(), kw, cat, sub,
-                           pri, selected[0] if selected else None)
+    kind, value = _amount(akind, aval)
+    if kind and value is None:
+        kind = None
+    txns = repo.transactions()
+    split = repo.splits_for(txns["id"])["transaction_id"]
+    txns = txns[~txns["id"].isin(split)]
+    return sp.preview_rule(txns, repo.rules(), kw, cat, sub, pri,
+                           selected[0] if selected else None, kind, value)
 
 
 @callback(
@@ -498,20 +585,23 @@ def _preview(selected, kw, cat, sub, pri):
     Input(f"{P}-cat", "value"),
     Input(f"{P}-sub", "value"),
     Input(f"{P}-pri", "value"),
+    Input(f"{P}-akind", "value"),
+    Input(f"{P}-aval", "value"),
     Input(f"{P}-pv-refresh", "data"),
     Input(f"{P}-refresh", "data"),
     State(f"{P}-table", "selected_row_ids"),
     State(f"{P}-pv", "style"),
 )
-def _show_preview(kw, cat, sub, pri, _r1, _r2, selected, style):
+def _show_preview(kw, cat, sub, pri, akind, aval, _r1, _r2, selected, style):
     hide = {**(style or {}), "display": "none"}
     if not (kw or "").strip() or not (cat and sub):
         return hide, "", [], "Apply to pending", "Apply to all it would change"
-    res = _preview(selected, kw, cat, sub, pri)
+    res = _preview(selected, kw, cat, sub, pri, akind, aval)
     m, beaten = res["matched"], res["beaten"]
     n = {k: int((m["state"] == k).sum()) for k in ("same", "pending",
                                                    "differs")}
-    word = kw.strip().upper()
+    kind, value = _amount(akind, aval)
+    word = sp.rule_label(kw.strip().upper(), kind if value else None, value)
     lines = [f"'{word}' would place {len(m):,} stored line"
              f"{'s' * (len(m) != 1)}: {n['same']:,} already {cat} / {sub}, "
              f"{n['differs']:,} in other categories, {n['pending']:,} "
@@ -526,7 +616,7 @@ def _show_preview(kw, cat, sub, pri, _r1, _r2, selected, style):
     m = m.sort_values(["_o", "date"], ascending=[True, False]).head(500)
     data = [{"date": r["date"], "card": r["card"],
              "description": r["description"],
-             "amount_fmt": gbp(r["amount"]),
+             "amount": r["amount"],
              "now": (f"{r['category']} / {r['subcategory']}"
                      if r["category"] else "\u2014"),
              "state": {"same": "", "pending": "pending",
@@ -548,20 +638,66 @@ def _show_preview(kw, cat, sub, pri, _r1, _r2, selected, style):
     State(f"{P}-cat", "value"),
     State(f"{P}-sub", "value"),
     State(f"{P}-pri", "value"),
+    State(f"{P}-akind", "value"),
+    State(f"{P}-aval", "value"),
+    State(f"{P}-rnote", "value"),
     State(f"{P}-pv-refresh", "data"),
     prevent_initial_call=True,
 )
-def _apply_preview(_p, _a, selected, kw, cat, sub, pri, refresh):
+def _apply_preview(_p, _a, selected, kw, cat, sub, pri, akind, aval, note,
+                   refresh):
     if not ((kw or "").strip() and cat and sub):
         return message("Fill in the keyword, category and sub-category.",
                        ok=False), no_update
-    m = _preview(selected, kw, cat, sub, pri)["matched"]
+    m = _preview(selected, kw, cat, sub, pri, akind, aval)["matched"]
     want = ["pending"] if ctx.triggered_id == f"{P}-pv-pending" \
         else ["pending", "differs"]
     ids = m.loc[m["state"].isin(want), "id"].tolist()
     if not ids:
         return message("Nothing to change."), no_update
-    n = repo.assign(ids, cat, sub)
+    n = repo.assign(ids, cat, sub, note=note if note else None)
     return (message(f"Set {n} stored line{'s' * (n != 1)} to {cat} / {sub}. "
                     "Save rule too, if future imports should do the same."),
             (refresh or 0) + 1)
+
+
+# --- Split templates --------------------------------------------------------------
+
+def _parts_text(parts) -> str:
+    bits = []
+    for p in parts:
+        amt = ("rest" if p["kind"] == "rest" else
+               f"{p['value']:g}%" if p["kind"] == "percent" else
+               f"£{p['value']:,.2f}")
+        note = f" ({p['note']})" if p.get("note") else ""
+        bits.append(f"{p['category']} / {p['subcategory']}{note} {amt}")
+    return " + ".join(bits)
+
+
+@callback(
+    Output(f"{P}-tpls", "data"),
+    Input(f"{P}-refresh", "data"),
+)
+def _templates(_r):
+    t = repo.templates()
+    return [{"id": int(r["id"]), "name": r["name"],
+             "parts": _parts_text(r["parts"]), "uses": int(r["uses"])}
+            for r in t.to_dict("records")]
+
+
+@callback(
+    Output(f"{P}-tmsg", "children"),
+    Output(f"{P}-refresh", "data", allow_duplicate=True),
+    Input(f"{P}-tdel", "n_clicks"),
+    State(f"{P}-tpls", "selected_row_ids"),
+    State(f"{P}-tpls", "data"),
+    State(f"{P}-refresh", "data"),
+    prevent_initial_call=True,
+)
+def _delete_template(_n, selected, data, refresh):
+    if not selected:
+        return message("Tick a template first.", ok=False), no_update
+    name = next((r["name"] for r in data or [] if r["id"] == selected[0]), "")
+    repo.delete_template(selected[0])
+    return (message(f"Deleted '{name}'. Lines split with it keep their "
+                    "parts."), (refresh or 0) + 1)

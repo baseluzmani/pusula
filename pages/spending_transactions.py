@@ -2,11 +2,15 @@
 Spending -> Transactions.
 
 Every stored bank line, filtered. Tick rows to change their category (with
-Remember for a merchant that recurs), or send them back to the Manual Queue.
-Export downloads exactly what the filters show.
+Remember for a merchant that recurs - for Amazon, PayPal and cash lines, the
+keyword with the amount), set a note, split a line into parts, or send rows
+back to the Manual Queue. Export downloads exactly what the filters show.
 
-Amounts are in pounds. A line from a card in another currency also shows
-what the statement said, under Original.
+Amounts are in pounds and sort as numbers. A line from a card in another
+currency also shows what the statement said, under Original. Statement shows
+which statement a line is on ("provisional": a CSV row whose statement has
+not been uploaded yet). A split line shows its parts; the category filter and
+the totals use the parts.
 """
 
 from __future__ import annotations
@@ -17,11 +21,13 @@ import pandas as pd
 from dash import (html, dcc, dash_table, callback, Input, Output, State, ctx,
                   no_update)
 
-from core import theme, spending as sp
+from core import theme
 from core.repo import spending as repo
-from ui.spend import (TABLE, money_cells, btn, field, bar, header, message,
-                      gbp, assign_bar, register_subcategories, select_rows, INPUT,
-                      NOTE)
+from core import spending as sp
+from ui.spend import (TABLE, money_cells, money_col, btn, field, bar, header,
+                      message, gbp, assign_bar, register_subcategories,
+                      select_rows, split_panel, register_split, remember_rule,
+                      INPUT, NOTE)
 
 P = "sp-tx"
 
@@ -29,12 +35,17 @@ COLUMNS = [
     {"name": "Date", "id": "date"},
     {"name": "Card", "id": "card"},
     {"name": "Description", "id": "description"},
-    {"name": "Amount", "id": "amount_fmt"},
+    money_col("Amount", "amount"),
     {"name": "Original", "id": "orig_fmt"},
     {"name": "Category", "id": "category"},
     {"name": "Sub-category", "id": "subcategory"},
+    {"name": "Note", "id": "note"},
+    {"name": "Statement", "id": "statement"},
     {"name": "Status", "id": "status"},
 ]
+ON_STATEMENT = [{"label": "All", "value": "all"},
+                {"label": "On a statement", "value": "yes"},
+                {"label": "Provisional", "value": "no"}]
 
 
 def render():
@@ -44,7 +55,8 @@ def render():
     cats = list(repo.categories())
     return html.Div([
         header("Transactions", "Every stored bank line. Tick rows to change "
-               "their category or send them back to the Manual Queue."),
+               "their category, add a note, split one, or send them back to "
+               "the Manual Queue."),
         html.Div([
             bar(
                 field("From", dcc.DatePickerSingle(
@@ -57,28 +69,31 @@ def render():
                 field("Card", dcc.Dropdown(
                     id=f"{P}-card", value=None, placeholder="All",
                     options=repo.card_names(active_only=False), style=drop),
-                    width="170px"),
+                    width="160px"),
                 field("Category", dcc.Dropdown(
                     id=f"{P}-fcat", value=None, placeholder="All",
-                    options=cats, style=drop), width="170px"),
+                    options=cats, style=drop), width="160px"),
                 field("Sub-category", dcc.Dropdown(
                     id=f"{P}-fsub", value=None, placeholder="All",
-                    options=[], style=drop), width="170px"),
+                    options=[], style=drop), width="160px"),
                 field("Status", dcc.Dropdown(
                     id=f"{P}-status", value="confirmed", clearable=False,
                     options=[{"label": "Confirmed", "value": "confirmed"},
                              {"label": "Pending", "value": "pending"},
                              {"label": "All", "value": "all"}],
-                    style=drop), width="120px"),
+                    style=drop), width="110px"),
                 field("Type", dcc.Dropdown(
                     id=f"{P}-type", value="all", clearable=False,
                     options=[{"label": "All", "value": "all"},
                              {"label": "Spending", "value": "debit"},
                              {"label": "Credits", "value": "credit"}],
-                    style=drop), width="120px"),
+                    style=drop), width="110px"),
+                field("Statement", dcc.Dropdown(
+                    id=f"{P}-onst", value="all", clearable=False,
+                    options=ON_STATEMENT, style=drop), width="140px"),
                 field("Search", dcc.Input(id=f"{P}-search", type="text",
                                           debounce=True,
-                                          placeholder="description…",
+                                          placeholder="description or note…",
                                           style={**INPUT, "width": "180px"})),
             ),
             html.Div([
@@ -90,7 +105,11 @@ def render():
                       "justifyContent": "space-between", "marginTop": "10px"}),
         ], style=theme.CARD),
         html.Div([
-            assign_bar(P, "Assign to selected", extra=[
+            assign_bar(P, "Assign to selected", note=True, extra=[
+                html.Button("Set note only", id=f"{P}-noteonly", n_clicks=0,
+                            style=btn()),
+                html.Button("Split…", id=f"{P}-split-open", n_clicks=0,
+                            style=btn()),
                 html.Button("Send to Manual Queue", id=f"{P}-queue",
                             n_clicks=0, style=btn()),
                 html.Button("Select all", id=f"{P}-all", n_clicks=0,
@@ -103,19 +122,27 @@ def render():
                 id=f"{P}-table", columns=COLUMNS, data=[],
                 row_selectable="multi", selected_row_ids=[],
                 sort_action="native", page_action="native", page_size=100,
-                style_cell_conditional=money_cells("amount_fmt", "orig_fmt") + [
-                    {"if": {"column_id": "description"}, "width": "36%"}],
+                style_cell_conditional=money_cells("amount", "orig_fmt") + [
+                    {"if": {"column_id": "description"}, "width": "30%"}],
                 style_data_conditional=[
                     {"if": {"column_id": "orig_fmt"}, "color": theme.SLATE},
+                    {"if": {"column_id": "statement",
+                            "filter_query": '{statement} = "provisional"'},
+                     "color": theme.NEEDLE},
+                    {"if": {"filter_query": '{category} = "Split"',
+                            "column_id": "subcategory"},
+                     "color": theme.SLATE},
                     {"if": {"filter_query": "{status} = pending"},
                      "backgroundColor": theme.TINT_NEAR}],
                 **TABLE),
         ], style=theme.CARD),
+        split_panel(P),
         dcc.Store(id=f"{P}-refresh", data=0),
     ])
 
 
 register_subcategories(P)
+register_split(P, f"{P}-refresh")
 
 
 @callback(Output(f"{P}-fsub", "options"), Output(f"{P}-fsub", "value"),
@@ -127,36 +154,49 @@ def _filter_subs(cat):
     return subs, None
 
 
-def _filtered(date_from, date_to, card, cat, sub, status, kind, search):
+def _filtered(date_from, date_to, card, cat, sub, status, kind, onst,
+              search):
+    """(lines to show, the amounts the totals count). With a category
+    filter a split line shows when one of its parts matches, and only the
+    matching parts count."""
     df = repo.transactions(date_from or None, date_to or None,
                            None if status == "all" else status)
     if card:
         df = df[df["card"] == card]
-    if cat:
-        df = df[df["category"] == cat]
-    if sub:
-        df = df[df["subcategory"] == sub]
     if kind == "debit":
         df = df[df["amount"] < 0]
     elif kind == "credit":
         df = df[df["amount"] > 0]
+    if onst == "yes":
+        df = df[df["statement_id"].notna()]
+    elif onst == "no":
+        df = df[df["statement_id"].isna()]
     if search:
-        df = df[df["description"].str.contains(search, case=False,
-                                               regex=False)]
-    return df
+        hit = df["description"].str.contains(search, case=False, regex=False)
+        hit |= df["note"].fillna("").str.contains(search, case=False,
+                                                  regex=False)
+        df = df[hit]
+    parts = repo.expanded(df)
+    if cat:
+        parts = parts[parts["category"] == cat]
+    if sub:
+        parts = parts[parts["subcategory"] == sub]
+    if cat or sub:
+        df = df[df["id"].isin(parts["id"])]
+    return df, parts
 
 
 FILTERS = [Input(f"{P}-from", "date"), Input(f"{P}-to", "date"),
            Input(f"{P}-card", "value"), Input(f"{P}-fcat", "value"),
            Input(f"{P}-fsub", "value"), Input(f"{P}-status", "value"),
-           Input(f"{P}-type", "value"), Input(f"{P}-search", "value")]
+           Input(f"{P}-type", "value"), Input(f"{P}-onst", "value"),
+           Input(f"{P}-search", "value")]
 
 
-def _original(r) -> str:
-    """'(1,025.70) TRY' for a line converted from another currency."""
-    if pd.isna(r.get("amount_orig")) or not r.get("currency"):
-        return ""
-    return f"{gbp(r['amount_orig'])} {r['currency']}"
+def _statement_labels() -> dict:
+    sts = repo.statements()
+    return {int(r["id"]): f"{pd.Timestamp(r['period_to']):%b %Y}"
+            for r in sts.to_dict("records")}
 
 
 @callback(
@@ -165,21 +205,46 @@ def _original(r) -> str:
     *FILTERS,
     Input(f"{P}-refresh", "data"),
 )
-def _load(date_from, date_to, card, cat, sub, status, kind, search, _r):
-    df = _filtered(date_from, date_to, card, cat, sub, status, kind, search)
+def _load(date_from, date_to, card, cat, sub, status, kind, onst, search,
+          _r):
+    df, parts = _filtered(date_from, date_to, card, cat, sub, status, kind,
+                          onst, search)
     if df.empty:
         return [], "No transactions match these filters."
-    data = [{"id": int(r["id"]), "date": r["date"], "card": r["card"],
-             "description": r["description"],
-             "amount_fmt": gbp(r["amount"]),
-             "orig_fmt": _original(r),
-             "category": r["category"] or "", "subcategory":
-             r["subcategory"] or "", "status": r["status"]}
-            for r in df.to_dict("records")]
-    spend = df.loc[df["amount"] < 0, "amount"].sum()
-    credits = df.loc[df["amount"] > 0, "amount"].sum()
+    labels = _statement_labels()
+    splits = parts[parts["split_of"].notna()] if "split_of" in parts else \
+        parts.iloc[0:0]
+    if not (cat or sub):
+        splits = repo.splits_for(df["id"]).rename(
+            columns={"transaction_id": "split_of"})
+    split_text = {}
+    for tid, g in splits.groupby("split_of"):
+        split_text[int(tid)] = " · ".join(f"{p['subcategory']} "
+                                          f"{gbp(p['amount'])}"
+                                          for p in g.to_dict("records"))
+    data = []
+    for r in df.to_dict("records"):
+        tid = int(r["id"])
+        sid = r["statement_id"]
+        orig = ("" if pd.isna(r.get("amount_orig")) or not r.get("currency")
+                else f"{gbp(r['amount_orig'])} {r['currency']}")
+        data.append({"id": tid, "date": r["date"], "card": r["card"],
+                     "description": r["description"], "amount": r["amount"],
+                     "orig_fmt": orig,
+                     "category": ("Split" if tid in split_text
+                                  else r["category"] or ""),
+                     "subcategory": split_text.get(tid,
+                                                   r["subcategory"] or ""),
+                     "note": r["note"] if isinstance(r["note"], str) else "",
+                     "statement": ("provisional" if pd.isna(sid)
+                                   else labels.get(int(sid), "")),
+                     "status": r["status"]})
+    amounts = parts["amount"]
+    spend, credits = amounts[amounts < 0].sum(), amounts[amounts > 0].sum()
     info = (f"{len(df):,} transactions · spending {gbp(spend)} · "
-            f"credits {gbp(credits)} · net {gbp(spend + credits)}")
+            f"credits {gbp(credits)} · net {gbp(spend + credits)}"
+            + (" (matching split parts only)" if (cat or sub) and
+               not splits.empty else ""))
     return data, info
 
 
@@ -190,9 +255,9 @@ def _load(date_from, date_to, card, cat, sub, status, kind, search, _r):
     prevent_initial_call=True,
 )
 def _export(_n, *filters):
-    df = _filtered(*filters).drop(columns=["import_id"])
-    return dcc.send_data_frame(df.to_csv, "spending_transactions.csv",
-                               index=False)
+    df, _ = _filtered(*filters)
+    return dcc.send_data_frame(df.drop(columns=["import_id"]).to_csv,
+                               "spending_transactions.csv", index=False)
 
 
 @callback(
@@ -222,46 +287,60 @@ def _suggest(selected, data):
     by_id = {r["id"]: r for r in data or []}
     for i in selected or []:
         r = by_id.get(i)
-        if r and sp.remembers(r["description"]):
-            return sp.suggest_keyword(r["description"]), []
+        if r:
+            return sp.remember_keyword(r["description"]), []
     return "", []
 
 
 @callback(
     Output(f"{P}-msg", "children"),
-    Output(f"{P}-refresh", "data"),
+    Output(f"{P}-refresh", "data", allow_duplicate=True),
     Input(f"{P}-apply", "n_clicks"),
     Input(f"{P}-queue", "n_clicks"),
+    Input(f"{P}-noteonly", "n_clicks"),
     State(f"{P}-table", "selected_row_ids"),
     State(f"{P}-table", "data"),
     State(f"{P}-cat", "value"),
     State(f"{P}-sub", "value"),
+    State(f"{P}-note", "value"),
     State(f"{P}-remember", "value"),
     State(f"{P}-kw", "value"),
     State(f"{P}-refresh", "data"),
     prevent_initial_call=True,
 )
-def _apply(_a, _q, selected, data, cat, sub, remember, kw, refresh):
+def _apply(_a, _q, _n, selected, data, cat, sub, note, remember, kw,
+           refresh):
     if not selected:
         return message("Tick at least one row first.", ok=False), no_update
-    if ctx.triggered_id == f"{P}-queue":
+    bump = (refresh or 0) + 1
+    trig = ctx.triggered_id
+    if trig == f"{P}-queue":
         n = repo.set_status(selected, "pending")
         return (message(f"Sent {n} row{'s' * (n != 1)} to the Manual Queue."),
-                (refresh or 0) + 1)
+                bump)
+    if trig == f"{P}-noteonly":
+        n = repo.set_note(selected, note)
+        return message(f"Note set on {n} row{'s' * (n != 1)}."), bump
     if not (cat and sub):
         return message("Pick a category and sub-category.", ok=False), no_update
-    n = repo.assign(selected, cat, sub)
+    n = repo.assign(selected, cat, sub, note=note if note else None)
     text = f"Assigned {n} row{'s' * (n != 1)} to {cat} / {sub}."
     if "y" in (remember or []):
         by_id = {r["id"]: r for r in data or []}
-        descs = [by_id[i]["description"] for i in selected if i in by_id]
-        text += " " + _remember(descs, kw, cat, sub)
-    return message(text), (refresh or 0) + 1
+        _, said = remember_rule([by_id[i] for i in selected if i in by_id],
+                                kw, cat, sub, note)
+        text += " " + said
+    return message(text), bump
 
 
-def _remember(descs, kw, cat, sub) -> str:
-    problem = sp.keyword_problem(descs, kw)
-    if problem:
-        return "Not remembered: " + problem
-    return (f"Rule '{repo.save_rule(kw.strip(), cat, sub)}' saved for future "
-            "imports.")
+@callback(
+    Output(f"{P}-split-txn", "data"),
+    Output(f"{P}-msg", "children", allow_duplicate=True),
+    Input(f"{P}-split-open", "n_clicks"),
+    State(f"{P}-table", "selected_row_ids"),
+    prevent_initial_call=True,
+)
+def _open_split(n, selected):
+    if not selected or len(selected) != 1:
+        return no_update, message("Tick one row to split.", ok=False)
+    return {"id": int(selected[0]), "nonce": n}, ""

@@ -8,7 +8,8 @@ in the spending total. Finance is excluded by default, as it was on 8052:
 card repayments and transfers live there.
 
 Amounts are signed as stored - spending in brackets - so a refund inside a
-category reduces that category's figure.
+category reduces that category's figure. A split line counts as its parts:
+£200 cash split into cleaning and tutor adds to both.
 """
 
 from __future__ import annotations
@@ -85,7 +86,8 @@ def render():
 # --- data ---------------------------------------------------------------------
 
 def _frames(year, show, xcat, xsub, xcard):
-    df = repo.year_rows(year)
+    # Split lines count as their parts, each in its own category.
+    df = repo.year_rows(year, expand=True)
     if xcard:
         df = df[~df["card"].isin(xcard)]
     df = df.assign(category=df["category"].fillna(UNASSIGNED),

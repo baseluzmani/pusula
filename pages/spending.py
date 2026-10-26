@@ -4,14 +4,15 @@ from dash import html, callback, Input, Output
 from ui.layout import page_header, subtabs
 from core import theme
 from pages import (spending_allowances, spending_overview,
-                   spending_transactions, spending_queue, spending_import,
-                   spending_rules)
+                   spending_transactions, spending_statements, spending_queue,
+                   spending_import, spending_rules)
 
 dash.register_page(__name__, path="/spending", name="Spending", order=3)
 
 TABS = {
     "Overview": spending_overview.render,
     "Transactions": spending_transactions.render,
+    "Statements": spending_statements.render,
     "Manual Queue": spending_queue.render,
     "Import": spending_import.render,
     "Rules": spending_rules.render,

@@ -146,3 +146,124 @@ def test_a_transaction_dated_statement_has_no_posting_window():
                      credits=4.0, currency="TRY", by_posting_date=False)
     assert s.period is None
     assert s.adds_up
+
+
+# --- HSBC UK current account ------------------------------------------------------
+
+def test_detect_and_account_refs():
+    ca = "Your HSBC Premier Statement\nPayments Out £10.00\nSortcode 40-11-22"
+    assert st.detect(ca) == "HSBC UK current"
+    plain = "Your Statement\nwww.hsbc.co.uk\nPayments Out £1.00\nSortcode"
+    assert st.detect(plain) == "HSBC UK current"
+    assert st.account_ref("HSBC UK current",
+                          "Mr A Person 40-11-22 12345678 447") == \
+        "HSBC UK current:5678"
+    assert st.account_ref("HSBC UK", "Cardnumber Sheet\n1111 2222 3333 4444"
+                          ) == "HSBC UK:4444"
+    assert st.account_ref("HSBC TR", "Kart No : 4111 22** **** 5678\n") == \
+        "HSBC TR:5678"
+    assert st.account_ref("HSBC UK", "no number here") is None
+
+
+def test_ca_summary_reads_period_across_a_year_end():
+    text = ("Account Summary\nOpeningBalance £1,000.00\nPayments In £500.00\n"
+            "Payments Out £1,250.50\nClosingBalance £250.50 D\n"
+            "12 December to 11 January 2026 Bank Identifier Code")
+    s = st.ca_summary_from_text(text)
+    assert (s["period_from"], s["period_to"], s["statement_date"]) == \
+        ("2025-12-12", "2026-01-11", "2026-01-11")
+    assert (s["previous_balance"], s["credits"], s["debits"],
+            s["new_balance"]) == (1000.0, 500.0, 1250.5, -250.5)
+
+
+HEADER = [(53, 70, "Date"), (116, 149, "Payment"), (152, 169, "type"),
+          (172, 186, "and"), (189, 214, "details"), (350, 372, "£Paid"),
+          (375, 387, "out"), (438, 460, "£Paid"), (463, 470, "in"),
+          (513, 550, "£Balance")]
+
+
+def w(x1, text, x0=None):
+    """A word ending at x1 (amounts are right-aligned)."""
+    return (x0 if x0 is not None else x1 - 6 * len(text), x1, text)
+
+
+def test_ca_rows_join_details_and_put_the_type_last():
+    page = [
+        [(53, 60, "A")],
+        HEADER,
+        [(53, 61, "01"), (63, 75, "Sep"), (77, 85, "26"),
+         (140, 264, "BALANCEBROUGHTFORWARD"), w(550, "1,000.00")],
+        [(53, 61, "02"), (63, 75, "Sep"), (77, 85, "26"), (113, 125, "VIS"),
+         (140, 160, "CORNER"), (162, 180, "CAFE")],
+        [(140, 167, "Leeds"), w(389, "4.50")],
+        [(113, 125, ")))"), (140, 160, "BAKERY"), (162, 180, "LTD"),
+         w(389, "3.20"), w(550, "992.30")],
+        [(53, 61, "03"), (63, 75, "Sep"), (77, 85, "26"), (113, 124, "CR"),
+         (140, 161, "EMPLOYER"), (163, 175, "PAY"), w(471, "2,000.00"),
+         w(550, "2,992.30")],
+        [(53, 61, "03"), (63, 75, "Sep"), (77, 85, "26"),
+         (140, 258, "BALANCECARRIEDFORWARD"), w(550, "2,992.30")],
+        [(53, 100, "Footer"), (120, 200, "text")],
+    ]
+    rows, problems, opening = st.ca_rows_from_lines([page])
+    assert problems == [] and opening == 1000.0
+    assert rows == [
+        {"date": "2026-09-02", "description": "CORNER CAFE Leeds VIS",
+         "amount": -4.5, "note": None},
+        {"date": "2026-09-02", "description": "BAKERY LTD )))",
+         "amount": -3.2, "note": None},
+        {"date": "2026-09-03", "description": "EMPLOYER PAY CR",
+         "amount": 2000.0, "note": None}]
+
+
+def test_ca_running_balance_catches_a_misread_line():
+    page = [
+        HEADER,
+        [(53, 61, "01"), (63, 75, "Sep"), (77, 85, "26"),
+         (140, 264, "BALANCEBROUGHTFORWARD"), w(550, "100.00")],
+        [(53, 61, "02"), (63, 75, "Sep"), (77, 85, "26"), (113, 125, "DD"),
+         (140, 170, "GYM"), w(389, "30.00"), w(550, "60.00")],
+        [(113, 125, "VIS"), (140, 170, "SHOP"), w(389, "10.00"),
+         w(550, "5.00"), (552, 558, "D")],
+    ]
+    rows, problems, _ = st.ca_rows_from_lines([page])
+    assert len(rows) == 2
+    assert problems[0].startswith("running balance on 2026-09-02: statement "
+                                  "60.00, lines give 70.00")
+    assert "statement -5.00, lines give 50.00" in problems[1]
+
+
+def test_a_transaction_dated_statement_has_a_month_window():
+    rows = pd.DataFrame({"date": ["2026-08-25"], "description": ["A"],
+                         "amount": [-10.0]})
+    s = st.Statement(rows=rows, statement_date="2026-09-25",
+                     by_posting_date=False)
+    assert s.period is None and s.window == ("2026-08-26", "2026-09-25")
+    s = st.Statement(rows=rows, period_from="2026-08-12",
+                     period_to="2026-09-11", statement_date="2026-09-11")
+    assert s.period == s.window == ("2026-08-12", "2026-09-11")
+
+
+def test_ca_details_keep_the_pdfs_spacing():
+    page = [
+        HEADER,
+        [(53, 61, "01"), (63, 75, "Sep"), (77, 85, "26"),
+         (140, 264, "BALANCEBROUGHTFORWARD"), w(550, "50.00")],
+        [(53, 61, "02"), (63, 75, "Sep"), (77, 85, "26"),
+         (113, 125, "VIS", 0), (140, 160, "UBER", 0), (176, 200, "*ONE", 3)],
+        [(140, 190, "HELP.UBER.COM", 0), w(389, "5.00")],
+    ]
+    rows, problems, _ = st.ca_rows_from_lines([page])
+    assert rows[0]["description"] == "UBER   *ONE HELP.UBER.COM VIS"
+    # Two pieces of one word (no space between them) are joined.
+    assert st._spaced([(1, 2, "ENTERTA", 0), (2, 3, "I", 0),
+                       (5, 9, "LONDON", 1)]) == ["ENTERTAI LONDON"]
+
+
+def test_interest_comes_from_the_summary_box():
+    text = ("Summary Of Interest On This Statement\n"
+            "Interest on Standard Balance (Cash) at1.805% per month 1.52\n"
+            "TOTALINTERESTCHARGEDON THISSTATEMENT 1.52\n"
+            "Estimated interest - next month 128.13")
+    assert st.interest_from_text(text) == 1.52
+    assert st.interest_from_text("Estimated interest - next month 9.00") is None

@@ -91,7 +91,9 @@ def test_keyword_problem():
     rows = ["KFC                    ELTHAM        ENG",
             "IAP KFC ELTHAM"]
     assert sp.keyword_problem(rows, "kfc") is None
-    assert "does not appear" in sp.keyword_problem(rows, "KFC ELTHAM")
+    # Spacing does not count: the fixed-width line has 'KFC ELTHAM' too.
+    assert sp.keyword_problem(rows, "KFC ELTHAM") is None
+    assert "does not appear" in sp.keyword_problem(rows, "KFC LONDON")
     assert "vary per purchase" in sp.keyword_problem(
         ["AMAZON UK* J90ME0ES5   LONDON        LND"], "AMAZON")
     assert sp.keyword_problem(rows, "  ") == "The keyword is empty."
@@ -520,3 +522,435 @@ def test_reset_turkey_card_script(tmp_path):
     assert run("--apply").returncode == 0            # again: nothing to do
     t = sqlite3.connect(db_path)
     assert t.execute("SELECT COUNT(*) FROM spend_rules").fetchone()[0] == 4
+
+
+# --- pass 4: amount rules ------------------------------------------------------------
+
+AMOUNT_RULES = [("PAYPAL PAYMENT DD", "Lifestyle", "Subscriptions", "exact",
+                 12.99, "VPN"),
+                ("ROYAL BOROUGH", "Transport", "Parking", "max", 20.0, None),
+                ("ROYAL BOROUGH", "Tax & Fee", "Tax", None, None, None),
+                ("PAYPAL", "Shopping", "Home", None, None, None)]
+
+
+def test_rules_ignore_spacing():
+    rules = [("UBER   *EATS", "Food & Drink", "Restaurant")]
+    for d in ["UBER *EATS HELP.UBER.COM VIS",
+              "UBER   *EATS           HELP.UBER.COM ENG"]:
+        assert sp.classify(d, rules).subcategory == "Restaurant"
+
+
+def test_an_amount_rule_can_place_a_manual_queue_line():
+    m = sp.classify("PAYPAL PAYMENT DD", AMOUNT_RULES, -12.99)
+    assert (m.category, m.rule, m.note) == ("Lifestyle",
+                                            "PAYPAL PAYMENT DD = 12.99", "VPN")
+    assert m.key == ("PAYPAL PAYMENT DD", "exact", 12.99)
+    # Another amount: the keyword-only PAYPAL rule still may not take it.
+    assert sp.classify("PAYPAL PAYMENT DD", AMOUNT_RULES, -10).rule == \
+        sp.MANUAL
+
+
+def test_up_to_rules_and_their_fallback():
+    assert sp.classify("ROYAL BOROUGH OF GREENWICH", AMOUNT_RULES,
+                       -4.4).subcategory == "Parking"
+    assert sp.classify("ROYAL BOROUGH OF GREENWICH", AMOUNT_RULES,
+                       -176).subcategory == "Tax"
+    # Without an amount an amount rule cannot match.
+    assert sp.classify("ROYAL BOROUGH", AMOUNT_RULES).subcategory == "Tax"
+
+
+def test_remember_plan():
+    plan, _ = sp.remember_plan([{"description": "KFC ELTHAM", "amount": -5}],
+                               "kfc")
+    assert plan == {"keyword": "KFC", "amount_kind": None, "amount": None}
+    plan, _ = sp.remember_plan(
+        [{"description": "PAYPAL PAYMENT DD", "amount": -12.99}] * 2,
+        sp.remember_keyword("PAYPAL PAYMENT DD"))
+    assert plan == {"keyword": "PAYPAL PAYMENT DD", "amount_kind": "exact",
+                    "amount": 12.99}
+    _, problem = sp.remember_plan(
+        [{"description": "PAYPAL PAYMENT DD", "amount": -12.99},
+         {"description": "PAYPAL PAYMENT DD", "amount": -6}], "PAYPAL")
+    assert "one amount" in problem
+    _, problem = sp.remember_plan(
+        [{"description": "PAYPAL PAYMENT DD", "amount": -1},
+         {"description": "PAYPAL *SHOP", "amount": -1}], "PAYPAL")
+    assert "apart" in problem
+    assert sp.remember_keyword("CASH RB SCOT SEP17 @18:11 ATM") == "CASH"
+
+
+# --- pass 4: splits ---------------------------------------------------------------
+
+def test_part_amounts_and_resolving_a_template():
+    assert sp.parse_part_amount("120") == ("fixed", 120.0)
+    assert sp.parse_part_amount(" 40% ") == ("percent", 40.0)
+    assert sp.parse_part_amount("") == ("rest", None)
+    with pytest.raises(ValueError):
+        sp.parse_part_amount("abc")
+    tpl = [{"kind": "fixed", "value": 120, "category": "Household",
+            "subcategory": "Cleaning"},
+           {"kind": "rest", "value": None, "category": "Education",
+            "subcategory": "Tutor"}]
+    assert [p["amount"] for p in sp.resolve_parts(-200, tpl)] == [-120, -80]
+    assert [p["amount"] for p in sp.resolve_parts(-190, tpl)] == [-120, -70]
+    with pytest.raises(ValueError, match="already take"):
+        sp.resolve_parts(-100, tpl)
+    pct = [{"kind": "percent", "value": 25}, {"kind": "rest"}]
+    assert [p["amount"] for p in sp.resolve_parts(-99.99, pct)] == \
+        [-25.0, -74.99]
+    with pytest.raises(ValueError, match="add up"):
+        sp.resolve_parts(-50, [{"kind": "fixed", "value": 20},
+                               {"kind": "fixed", "value": 20}])
+
+
+def test_check_split():
+    good = [{"amount": -120, "category": "A", "subcategory": "a"},
+            {"amount": -80, "category": "B", "subcategory": "b"}]
+    assert sp.check_split(-200, good) is None
+    assert "two parts" in sp.check_split(-200, good[:1])
+    assert "add up" in sp.check_split(-210, good)
+    assert "wrong sign" in sp.check_split(
+        -200, [good[0], {**good[1], "amount": 80}])
+    assert "needs a category" in sp.check_split(
+        -200, [good[0], {**good[1], "category": None}])
+
+
+def test_expand_splits_replaces_a_line_by_its_parts():
+    txns = pd.DataFrame({"id": [1, 2], "date": ["2026-09-01"] * 2,
+                         "description": ["CASH", "TESCO"],
+                         "amount": [-200.0, -5.0],
+                         "category": [None, "Groceries"],
+                         "subcategory": [None, "Tesco"],
+                         "note": [None, None], "status": ["confirmed"] * 2})
+    parts = pd.DataFrame({"transaction_id": [1, 1], "part": [1, 2],
+                          "amount": [-120.0, -80.0],
+                          "category": ["Household", "Education"],
+                          "subcategory": ["Cleaning", "Tutor"],
+                          "note": [None, "maths"]})
+    out = sp.expand_splits(txns, parts)
+    assert sorted(out["amount"]) == [-120.0, -80.0, -5.0]
+    assert out["amount"].sum() == txns["amount"].sum()
+    assert set(out.loc[out["split_of"] == 1, "subcategory"]) == \
+        {"Cleaning", "Tutor"}
+
+
+# --- pass 4: suggestions ---------------------------------------------------------
+
+def test_suggestions_from_history():
+    hist = pd.DataFrame({
+        "date": ["2025-01-05", "2025-06-05", "2025-03-01", "2026-01-01"],
+        "description": ["PAYPAL PAYMENT DD", "PAYPAL PAYMENT DD",
+                        "CASH RB SCOT X ATM", "CASH RB SCOT Y ATM"],
+        "amount": [-12.99, -12.99, -200.0, -200.0],
+        "category": ["Lifestyle", "Lifestyle", "Household", None],
+        "subcategory": ["Subscriptions", "Subscriptions", "Cleaning", None],
+        "note": ["VPN", "VPN", None, None], "template": [None, None, None, 3]})
+    idx = sp.history_index(hist)
+    s = sp.suggestions("PAYPAL PAYMENT DD", -12.99, idx)
+    assert s[0]["category"] == "Lifestyle" and s[0]["count"] == 2 \
+        and s[0]["note"] == "VPN" and s[0]["last"] == "2025-06-05"
+    assert sp.suggestions("PAYPAL PAYMENT DD", -6, idx) == []
+    # Cash: by amount alone; the newest first among equals.
+    cash = sp.suggestions("CASH RB SCOT Z ATM", -200, idx)
+    assert [c["template"] for c in cash] == [3, None]
+    assert sp.top_categories(hist, "PayPal") == [("Lifestyle", "Subscriptions")]
+
+
+# --- pass 4: statements ---------------------------------------------------------
+
+def lines(rows):
+    return pd.DataFrame(rows, columns=["date", "description", "amount"])
+
+
+def stored(rows):
+    return pd.DataFrame(rows, columns=["id", "date", "description", "amount"])
+
+
+def test_match_statement_passes():
+    st_lines = lines([("2026-09-14", "PUB VIS", -6.54),
+                      ("2026-09-14", "PUB VIS", -6.54),
+                      ("2026-09-23", "AIL DD", -34.82),
+                      ("2026-10-01", "ROYAL GREENWICH DD", -176.0),
+                      ("2026-10-05", "PAYPAL PAYMENT DD", -12.99),
+                      ("2026-10-06", "TESCO STORES 6500 ELTHAM GBR", -4.58),
+                      ("2026-10-07", "COUNCIL DD", -50.0),
+                      ("2026-10-08", "TESCO STORES 6500 ELTHAM GBR", -9.0),
+                      ("2026-10-09", "NEW SHOP VIS", -9.0)])
+    db_rows = stored([(1, "2026-09-14", "PUB VIS", -6.54),
+                      (2, "2026-09-14", "PUB  VIS", -6.54),
+                      (3, "2026-09-22", "AIL DD", -34.8),
+                      (4, "2026-10-01", "ROYAL GREENWICH DD - tax", -176.0),
+                      (5, "2026-10-04", "PAYPAL PAYMENT DD - VPN", -12.99),
+                      (6, "2026-10-06", "))) TESCO STORES 6500 ELTHAM 4.60",
+                       -4.6),
+                      (7, "2026-10-07", "BOROUGH COUNCIL TAX", -50.0),
+                      (8, "2026-10-09", "TESCO EXPRESS 22", -9.04),
+                      (9, "2026-09-30", "PHANTOM VIS", -1.0),
+                      (10, "2026-10-20", "AFTER VIS", -2.0)])
+    res = sp.match_statement(st_lines, db_rows, ("2026-09-12", "2026-10-11"))
+    kinds = {sid: kind for _, sid, kind in res["pairs"]}
+    assert kinds == {1: "exact", 2: "exact", 3: "shop", 4: "shop",
+                     5: "shop", 6: "shop", 7: "reworded", 8: "near"}
+    assert res["new"] == [8]
+    assert res["leftover"] == [9]            # 10 is outside the window
+
+
+def test_rounded_history_pairs_and_its_duplicates_go():
+    # 8052 kept amounts to 10p; an export of the same weeks is also stored.
+    st_lines = lines([("2025-12-22", "LIDL GB  ELTHAM        0827 LIDL GB  GBR",
+                       -174.22),
+                      ("2025-12-29", "UBER   *TRIP           HELP.UBER.COM ENG",
+                       -9.62)])
+    db_rows = stored([(1, "2025-12-22", "LIDL GB ELTHAM 0827 LIDL GB GBR",
+                       -174.2),
+                      (2, "2025-12-22", "LIDL GB  ELTHAM        0827 LIDL GB  "
+                       "GBR", -174.22),
+                      (3, "2025-12-29", "UBER *TRIP HELP.UBER.COM ENG 9.60",
+                       -9.6)])
+    res = sp.match_statement(st_lines, db_rows, ("2025-12-08", "2026-01-07"))
+    assert res["pairs"] == [(0, 2, "exact"), (1, 3, "shop")]
+    assert res["leftover"] == [1]
+    # A refund the history stored as spending pairs, and takes its sign.
+    flip = sp.match_statement(lines([("2025-12-22", "ASDA REFUND VIS", 8.0)]),
+                              stored([(1, "2025-12-22", "ASDA REFUND VIS",
+                                       -8.0)]), ("2025-12-01", "2025-12-31"))
+    assert flip["pairs"] == [(0, 1, "sign")]
+    # Same sign is preferred when both are there.
+    both = sp.match_statement(lines([("2025-12-22", "ASDA", 8.0)]),
+                              stored([(1, "2025-12-22", "ASDA", -8.0),
+                                      (2, "2025-12-22", "ASDA", 8.0)]),
+                              ("2025-12-01", "2025-12-31"))
+    assert both["pairs"] == [(0, 2, "exact")] and both["leftover"] == [1]
+    # Not beyond 5p.
+    assert sp.match_statement(lines([("2025-12-22", "LIDL", -4.6)]),
+                              stored([(1, "2025-12-22", "LIDL", -4.7)]),
+                              ("2025-12-01", "2025-12-31"))["new"] == [0]
+
+
+def test_shop_text():
+    assert sp.core_text("))) TESCO STORES 6500 ELTHAM 4.60") == \
+        "TESCO STORES 6500 ELTHAM"
+    assert sp.same_shop("Amazon.co.uk*ZG7073G84",
+                        "Amazon.co.uk*ZG7073G84 LONDON        GBR")
+    assert not sp.same_shop("TESCO EXPRESS", "TESCO STORES")
+    assert not sp.extra_wording("))) TESCO STORES 6500 ELTHAM 4.60",
+                                "TESCO STORES 6500      ELTHAM        GBR")
+    assert sp.extra_wording("PAYPAL PAYMENT DD - VPN", "PAYPAL PAYMENT DD")
+    # The export drops commas.
+    assert not sp.extra_wording("WILLOW WALK VICTORIA  LON )))",
+                                "WILLOW WALK VICTORIA, LON )))")
+
+
+def test_match_statements_pairs_exact_across_statements_first():
+    # The stored row is the second statement's word for word; the first
+    # statement has a looser candidate for it. Exact wins.
+    first = lines([("2026-09-10", "PUB VIS", -5.0)])
+    second = lines([("2026-09-12", "PUB VIS", -5.0)])
+    db_rows = stored([(1, "2026-09-12", "PUB VIS", -5.0),
+                      (2, "2026-09-05", "OLD VIS", -1.0)])
+    out = sp.match_statements([(first, ("2026-08-12", "2026-09-11")),
+                               (second, ("2026-09-12", "2026-10-11"))],
+                              db_rows)
+    assert out[1]["pairs"] == [(0, 1, "exact")]
+    assert out[0]["pairs"] == [] and out[0]["new"] == [0]
+    assert out[0]["leftover"] == [2] and out[1]["leftover"] == []
+
+
+def test_statement_checks_and_holes():
+    a = {"period_from": "2026-08-12", "period_to": "2026-09-11",
+         "previous_balance": 100.0, "new_balance": 90.0, "debits": 10.0,
+         "credits": 0.0}
+    b = {"period_from": "2026-09-12", "period_to": "2026-10-11",
+         "previous_balance": 90.0, "new_balance": 95.0, "debits": 5.0,
+         "credits": 10.0}
+    linked = pd.DataFrame({"amount": [-5.0, 10.0]})
+    chk = sp.statement_checks(b, linked, a)
+    assert chk["ok"] and chk["lines_ok"] and chk["chain_ok"]
+    assert not sp.statement_checks(b, linked.iloc[:1], a)["ok"]
+    assert sp.statement_checks({**b, "previous_balance": 91.0}, linked,
+                               a)["chain_ok"] is False
+    assert not sp.statement_checks(b, linked, a, unlinked=1)["ok"]
+    c = {**b, "period_from": "2026-11-12", "period_to": "2026-12-11"}
+    sts = pd.DataFrame([{**a, "card": "D"}, {**c, "card": "D"}])
+    assert sp.missing_periods(sts) == [{"card": "D", "from": "2026-09-12",
+                                        "to": "2026-11-11"}]
+    assert sp.statement_checks(c, linked, a)["chain_ok"] is None
+
+
+def test_coverage_grid():
+    sts = pd.DataFrame([{"card": "D", "id": 1, "period_to": "2026-09-11",
+                         "ok": True},
+                        {"card": "D", "id": 2, "period_to": "2026-12-11",
+                         "ok": False}])
+    missing = [{"card": "D", "from": "2026-09-12", "to": "2026-11-11"}]
+    unl = pd.DataFrame([{"card": "D", "month": "2027-01", "rows": 4},
+                        {"card": "C", "month": "2026-10", "rows": 1}])
+    grid = sp.coverage(sp.month_span("2026-09", "2027-01"), sts, missing, unl)
+    assert grid["D"] == {"2026-09": ("ok", 1), "2026-10": ("missing", None),
+                         "2026-11": ("missing", None),
+                         "2026-12": ("break", 2),
+                         "2027-01": ("provisional", None)}
+    assert grid["C"] == {"2026-10": ("provisional", None)}
+
+
+# --- pass 4: repo ---------------------------------------------------------------
+
+def test_old_rules_table_loses_its_keyword_unique(tmp_path, monkeypatch):
+    path = tmp_path / "old.db"
+    c = sqlite3.connect(path)
+    c.executescript("""
+        CREATE TABLE spend_rules (id INTEGER PRIMARY KEY AUTOINCREMENT,
+            keyword TEXT NOT NULL UNIQUE, category TEXT NOT NULL,
+            subcategory TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 100,
+            created_at TEXT);
+        INSERT INTO spend_rules (id, keyword, category, subcategory, priority)
+        VALUES (7, 'PAYPAL PAYMENT DD', 'Shopping', 'Home', 5);
+    """)
+    c.close()
+    monkeypatch.setattr(config, "DB_PATH", path)
+    from core.repo import spending as r
+    r.ensure_tables()
+    assert r.rules()["id"].tolist() == [7]
+    assert r.save_rule("paypal payment dd", "Lifestyle", "Subscriptions",
+                       amount_kind="exact", amount=-12.99,
+                       note="VPN") == "PAYPAL PAYMENT DD = 12.99"
+    assert r.save_rule("PAYPAL PAYMENT DD", "Lifestyle", "Fitness",
+                       amount_kind="exact", amount=12.99) == \
+        "PAYPAL PAYMENT DD = 12.99"                     # same rule, updated
+    assert len(r.rules()) == 2
+    assert r.rule_tuples()[-1] == ("PAYPAL PAYMENT DD", "Lifestyle",
+                                   "Fitness", "exact", 12.99, None)
+    new_id = int(r.rules()["id"].max())
+    assert "already uses" in r.update_rule(new_id, "PAYPAL PAYMENT DD",
+                                           "X", "y", None)
+
+
+def test_apply_statements_links_rewords_adds_and_deletes(repo):
+    repo.add_card("Debit Card")
+    keep = rows_(("2026-09-14", "PUB VIS", -6.5))
+    old = rows_(("2026-10-01", "COUNCIL DD - tax", -176.0))
+    junk = rows_(("2026-09-30", "PHANTOM VIS", -9.0))
+    for r in (keep, old, junk):
+        repo.import_rows("Debit Card", "x.csv", r, 1)
+    ids = dict(zip(repo.transactions()["description"],
+                   repo.transactions()["id"]))
+    record = {"bank": "HSBC UK current", "account_ref": "HSBC UK current:5678",
+              "currency": "GBP", "period_from": "2026-09-12",
+              "period_to": "2026-10-11", "statement_date": "2026-10-11",
+              "previous_balance": 1000.0, "new_balance": 803.5,
+              "debits": 196.5, "credits": 0.0, "lines": 3,
+              "filename": "s.pdf"}
+    res = repo.apply_statements("Debit Card", "s.pdf", [{
+        "record": record, "ref": "HSBC UK current:5678",
+        "link": [{"id": ids["PUB VIS"], "date": "2026-09-14",
+                  "description": "PUB VIS", "old_description": "PUB VIS"},
+                 {"id": ids["COUNCIL DD - tax"], "date": "2026-10-01",
+                  "description": "COUNCIL DD",
+                  "old_description": "COUNCIL DD - tax"}],
+        "insert": [{"date": "2026-10-05", "description": "NEW VIS",
+                    "amount": -14.0, "category": None, "subcategory": None,
+                    "status": "pending", "note": None}],
+        "delete": [ids["PHANTOM VIS"]]}], 3)
+    assert (res["linked"], res["reworded"], res["inserted"],
+            res["deleted"]) == (2, 1, 1, 1)
+    t = repo.transactions().set_index("description")
+    assert t.loc["COUNCIL DD", "note"] == "COUNCIL DD - tax"
+    assert t["statement_id"].notna().all() and "PHANTOM VIS" not in t.index
+    assert repo.card_for_ref("HSBC UK current:5678") == "Debit Card"
+    assert res["amounts"] == 0
+    over = repo.statement_overview().iloc[0]
+    assert over["ok"] and over["lines_stored"] == 3
+    # The same statement again changes nothing and stays one record.
+    again = repo.match_candidates("Debit Card", "2026-09-01", "2026-10-31",
+                                  [int(over["id"])])
+    assert len(again) == 3 and len(repo.statements()) == 1
+    # A CSV row on no statement inside the period breaks it.
+    repo.import_rows("Debit Card", "y.csv",
+                     rows_(("2026-09-20", "STRAY VIS", -1.0)), 1)
+    assert not repo.statement_overview().iloc[0]["ok"]
+    assert repo.unlinked_months()["month"].tolist() == ["2026-09"]
+
+
+def test_splits_templates_and_history(repo):
+    repo.add_category("Household")
+    repo.add_subcategory("Household", "Cleaning")
+    repo.import_rows("Credit Card", "a.csv",
+                     rows_(("2026-09-01", "CASH ATM", -200.0),
+                           status="pending"), 1)
+    tid = int(repo.transactions()["id"].iloc[0])
+    assert repo.save_template("Cash", [
+        {"category": "Household", "subcategory": "Cleaning", "kind": "fixed",
+         "value": 120},
+        {"category": "Groceries", "subcategory": "Tesco", "kind": "rest",
+         "value": None}]) is None
+    tpl = repo.templates().iloc[0]
+    parts = sp.resolve_parts(-200, tpl["parts"])
+    assert repo.save_split(tid, parts, int(tpl["id"])) is None
+    line = repo.transactions().iloc[0]
+    assert line["status"] == "confirmed" and line["category"] is None
+    year = repo.year_rows("2026", expand=True)
+    assert sorted(year["amount"]) == [-120.0, -80.0]
+    assert repo.templates().iloc[0]["uses"] == 1
+    assert repo.history()["template"].tolist() == [int(tpl["id"])]
+    assert repo.remap("Household", "Cleaning", "Groceries", "Tesco") == 1
+    assert set(repo.splits_for([tid])["category"]) == {"Groceries"}
+    assert "add up" in repo.save_split(tid, parts[:1] + parts[:1])
+    repo.assign([tid], "Groceries", "Tesco", note="weekly")
+    assert repo.splits_for([tid]).empty
+    assert repo.transactions().iloc[0]["note"] == "weekly"
+    repo.save_split(tid, parts, None)
+    repo.remove_split(tid)
+    assert repo.pending()["id"].tolist() == [tid]
+    repo.delete_template(int(tpl["id"]))
+    assert repo.templates().empty
+
+
+def test_restore_plan_fills_pending_lines_once():
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import spending_manual_backup as smb
+    backup = pd.DataFrame([
+        {"id": 1, "card": "C", "date": "2026-01-07", "description": "AMAZON A",
+         "amount": -77.4, "category": "Shopping", "subcategory": "Home",
+         "note": "", "splits": ""},
+        {"id": 2, "card": "C", "date": "2026-01-08", "description": "KEEP",
+         "amount": -5.0, "category": "X", "subcategory": "y", "note": "",
+         "splits": ""}])
+    current = pd.DataFrame({"id": [2, 10, 11]})
+    pending = pd.DataFrame([
+        {"id": 10, "card": "C", "date": "2026-01-08", "description": "AMAZON B",
+         "amount": -77.4},
+        {"id": 11, "card": "C", "date": "2026-01-07", "description": "AMAZON A",
+         "amount": -77.4}])
+    pairs = smb.plan_restore(backup, current, pending)
+    assert [(b["id"], p["id"]) for b, p in pairs] == [(1, 11)]
+    # History kept 10p: a pending -77.38 still takes the -77.40 line.
+    pending.loc[1, "amount"] = -77.38
+    pairs = smb.plan_restore(backup, current, pending)
+    assert [(b["id"], p["id"]) for b, p in pairs] == [(1, 11)]
+
+
+def test_a_linked_line_takes_the_statements_exact_amount(repo):
+    repo.add_category("Household")
+    repo.add_subcategory("Household", "Cleaning")
+    repo.import_rows("Credit Card", "h.csv",
+                     rows_(("2025-12-22", "LIDL", -174.2),
+                           ("2025-12-23", "CASH ATM", -200.0)), 2)
+    t = repo.transactions().set_index("description")["id"]
+    repo.save_split(int(t["CASH ATM"]), [
+        {"amount": -120.0, "category": "Household", "subcategory": "Cleaning"},
+        {"amount": -80.0, "category": "Groceries", "subcategory": "Tesco"}])
+    record = {"bank": "HSBC UK", "currency": "GBP",
+              "period_from": "2025-12-08", "period_to": "2026-01-07",
+              "debits": 374.24, "credits": 0.0}
+    res = repo.apply_statements("Credit Card", "s.pdf", [{
+        "record": record, "ref": None, "insert": [], "delete": [],
+        "link": [{"id": int(t["LIDL"]), "date": "2025-12-22",
+                  "description": "LIDL", "amount": -174.22},
+                 {"id": int(t["CASH ATM"]), "date": "2025-12-23",
+                  "description": "CASH ATM", "amount": -200.02}]}], 2)
+    assert res["amounts"] == 2
+    got = repo.transactions().set_index("description")["amount"]
+    assert got["LIDL"] == -174.22 and got["CASH ATM"] == -200.02
+    parts = repo.splits_for([int(t["CASH ATM"])])["amount"].tolist()
+    assert parts == [-120.0, -80.02]
+    assert repo.statement_overview().iloc[0]["ok"]
