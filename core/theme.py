@@ -119,3 +119,22 @@ def heat_rgb(val, cap=3.0):
     else:
         r = 255; g = int(255 + v * 150); b = int(255 + v * 170)
     return f"rgb({r},{g},{b})"
+
+
+# Day-move map tiles carry white text, so the scale runs between the two
+# signal colours through a dark neutral rather than through white. Every step
+# keeps white text above 5:1 contrast.
+TILE_MID = "#5B6472"
+
+
+def tile_rgb(val, cap=3.0):
+    """Diverging tile fill: NEGATIVE (at -cap) -> TILE_MID (0) -> POSITIVE
+    (at +cap), linear in between."""
+    if val is None or (isinstance(val, float) and val != val):
+        return TILE_MID
+    v = max(-1.0, min(1.0, val / cap))
+    end = POSITIVE if v >= 0 else NEGATIVE
+    a = [int(TILE_MID[i:i + 2], 16) for i in (1, 3, 5)]
+    b = [int(end[i:i + 2], 16) for i in (1, 3, 5)]
+    t = abs(v)
+    return "#" + "".join(f"{round(x + (y - x) * t):02X}" for x, y in zip(a, b))
