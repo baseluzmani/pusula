@@ -278,3 +278,122 @@ def test_table_rows_turn_nan_back_into_none():
     rows = _records(df)
     assert rows[0]["vs_ma"] is None and rows[1]["buy_target"] is None
     assert rows[0]["buy_target"] == 10.0 and rows[1]["note"] == "x"
+
+
+# --- trend phase and the next cross -------------------------------------------
+
+def _row(c, rules=RULES, days=700):
+    d = weekdays(days)
+    return mon.metrics(frame("A", d, np.asarray(c)[-len(d):]), rules=rules).iloc[0]
+
+
+def _base_then_rally(n):
+    """Peak, slide, a long base, then a rally: the 50-day still below the
+    200-day but catching up - the set-up just before a golden cross."""
+    return np.concatenate([np.linspace(480, 545, n - 200),
+                           np.linspace(520, 400, 60), np.full(110, 420.0),
+                           np.linspace(400, 460, 30)])
+
+
+def _flat_days_by_hand(c, fast=50, slow=200, limit=mon.CROSS_LIMIT):
+    above = c[-fast:].mean() > c[-slow:].mean()
+    path = np.asarray(c, dtype=float)
+    for k in range(1, limit + 1):
+        path = np.append(path, c[-1])
+        if (path[-fast:].mean() > path[-slow:].mean()) != above:
+            return k
+    return None
+
+
+def test_the_four_phases():
+    n = len(weekdays())
+    rise, fall = np.linspace(80, 140, n), np.linspace(140, 80, n)
+    assert _row(rise)["phase"] == "Uptrend"
+    assert _row(fall)["phase"] == "Downtrend"
+    dip = np.concatenate([np.linspace(80, 140, n - 15), np.linspace(140, 125, 15)])
+    r = _row(dip)
+    assert (r["cross"], r["phase"]) == ("Golden", "Weakening")
+    bounce = np.concatenate([np.linspace(140, 80, n - 15), np.linspace(80, 90, 15)])
+    r = _row(bounce)
+    assert (r["cross"], r["phase"]) == ("Death", "Improving")
+
+
+def test_next_cross_with_the_price_flat_matches_a_day_by_day_walk():
+    n = len(weekdays())
+    c = _base_then_rally(n)
+    r = _row(c)
+    k = _flat_days_by_hand(c)
+    assert (r["cross"], r["phase"], r["next_cross"]) == ("Death", "Improving",
+                                                         "Golden")
+    assert k is not None and r["next_days"] == k
+    assert r["next_due"] == (k if k <= RULES.cross_horizon else None)
+    assert r["ma_gap"] == pytest.approx(
+        (c[-50:].mean() / c[-200:].mean() - 1) * 100)
+    # The level where they meet sits between the two averages' paths.
+    assert c[-50:].mean() < r["next_level"] < c[-1]
+    # Weekday instrument: the date is k business days on.
+    expected = pd.Timestamp(np.busday_offset(np.datetime64(END, "D"), k,
+                                             roll="forward"))
+    assert r["next_date"] == expected
+
+
+def test_next_cross_beyond_the_horizon_is_not_due():
+    c = _base_then_rally(len(weekdays()))
+    r = _row(c, rules=mon.Rules(cross_horizon=3))
+    assert r["next_days"] > 3 and r["next_due"] is None
+
+
+def test_breakeven_puts_the_averages_level_on_day_k():
+    c = _base_then_rally(len(weekdays()))
+    for k in (1, 5, 10, 20, 60, 150):
+        p = mon.cross_breakeven(c, k, 50, 200)
+        path = np.append(c, np.full(k, p))
+        assert path[-50:].mean() == pytest.approx(path[-200:].mean(), rel=1e-9)
+    assert mon.cross_breakeven(c, 200, 50, 200) is None
+    assert mon.cross_breakeven(c[:150], 10, 50, 200) is None
+
+
+def test_breakeven_matches_the_row():
+    c = _base_then_rally(len(weekdays()))
+    r = _row(c)
+    assert (r["be_near_k"], r["be_far_k"]) == (10, RULES.cross_horizon)
+    assert r["be_near"] == pytest.approx(mon.cross_breakeven(c, 10, 50, 200))
+    assert r["be_far"] == pytest.approx(mon.cross_breakeven(c, 20, 50, 200))
+
+
+def test_trend_slope_of_an_exponential():
+    c = 100 * np.exp(0.002 * np.arange(80))
+    assert mon.trend_slope(c, 50) == pytest.approx(0.002)
+    assert mon.trend_slope(c[:10], 50) is None
+
+
+def test_trend_case_walks_the_price_on_its_slope():
+    c = _base_then_rally(len(weekdays()))
+    r = _row(c)
+    g = mon.trend_slope(c, 50)
+    path = c[-1] * np.exp(g * np.arange(1, mon.CROSS_LIMIT + 1))
+    k, _ = mon.project_cross(c, path, 50, 200)
+    assert r["trend_slope"] == pytest.approx(g * 100)
+    assert r["trend_days"] == k
+    assert k <= r["next_days"]                # a rising price gets there first
+
+
+def test_no_phase_or_next_cross_without_both_averages():
+    d = weekdays(200)                         # ~140 weekdays: no 200-day
+    r = mon.metrics(frame("A", d, wiggle(len(d)))).iloc[0]
+    assert r["phase"] is None and r["next_cross"] is None
+    assert r["next_due"] is None
+
+
+def test_next_cross_hover_and_phase_note():
+    from pages.monitor import _next_title, _phase_note
+    c = _base_then_rally(len(weekdays()))
+    rec = _row(c).to_dict()
+    rec["unit"] = "USD"
+    text = _next_title(rec, 50, 200)
+    assert "50-day" in text and "below the 200-day" in text
+    assert f"golden cross in ~{rec['next_days']} trading days" in text
+    assert "by day 10: price at or above" in text
+    note = str(_phase_note("Improving", 50, 200))
+    assert all(name in note for name, _ in mon.PHASE_TEXT)
+    assert "{fast}" not in note and "50-day" in note

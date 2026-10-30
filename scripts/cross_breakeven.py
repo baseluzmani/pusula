@@ -16,6 +16,8 @@ where A is the sum of the latest (50 - k) closes and B the sum of the latest
 fast average is on top by day k; below it, it is not.
 
 It also says when the cross comes if the price simply stays where it is.
+The sums live in core/monitor.py (cross_breakeven, project_cross), shared
+with the Monitor tab's Next cross column.
 
 Usage
 -----
@@ -34,35 +36,19 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.monitor import cross_breakeven as breakeven  # noqa: E402
+from core.monitor import project_cross                  # noqa: E402
 from core.repo import market as repo                  # noqa: E402
 
 HORIZONS = [5, 10, 15, 20, 25, 30, 40, 50, 60, 80, 100, 130]
-
-
-def breakeven(closes: np.ndarray, k: int, fast: int, slow: int) -> float | None:
-    """Flat price from tomorrow that makes fast == slow after k days."""
-    if k >= slow:
-        return None
-    b = closes[-(slow - k):].sum()
-    if k < fast:
-        a = closes[-(fast - k):].sum()
-        return (fast * b - slow * a) / ((slow - fast) * k)
-    return b / (slow - k)
 
 
 def days_if_flat(closes: np.ndarray, fast: int, slow: int,
                  limit: int = 250) -> int | None:
     """Trading days until the averages cross if every future close equals
     today's. None if not within the limit."""
-    p = closes[-1]
-    above_now = closes[-fast:].mean() > closes[-slow:].mean()
-    path = closes.copy()
-    for k in range(1, limit + 1):
-        path = np.append(path, p)
-        above = path[-fast:].mean() > path[-slow:].mean()
-        if above != above_now:
-            return k
-    return None
+    k, _ = project_cross(closes, np.full(limit, closes[-1]), fast, slow)
+    return k
 
 
 def main() -> None:

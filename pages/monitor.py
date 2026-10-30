@@ -8,10 +8,17 @@ core/monitor.py has the sums and the status rules; the rule thresholds are
 settings under Data -> Config, registered with their defaults the first time
 this tab opens.
 
+The 50/200 column also gives the trend phase (Uptrend / Weakening /
+Downtrend / Improving, from the price against the 50-day and the 50-day
+against the 200-day), and Next cross says how many trading days until the
+averages cross if the price stays where it is - shown within
+MONITOR_CROSS_HORIZON days, with the trend case and the price needed in the
+hover.
+
 Click a row to see its one-year chart (52-week high, 200-day average, your
-levels, your trades) and to set or change its levels. Levels are stored in
-the mkt_targets table (core/repo/targets.py), in the instrument's quote
-units - pence for a .L listing.
+levels, your trades, and a note on the phases) and to set or change its
+levels. Levels are stored in the mkt_targets table (core/repo/targets.py),
+in the instrument's quote units - pence for a .L listing.
 """
 
 from dash import html, dcc, callback, Input, Output, State, ctx, ALL, no_update
@@ -41,7 +48,15 @@ SETTINGS = [
      "Monitor: Watch after this many closes below the moving average"),
     ("MONITOR_NEAR_PCT", 5.0, "float",
      "Monitor: a level counts as near within this many percent"),
+    ("MONITOR_CROSS_HORIZON", 20, "int",
+     "Monitor: show the next 50/200 cross when the price held flat brings "
+     "it within this many trading days"),
 ]
+
+# Next cross cell: shaded within CROSS_NEAR trading days, darker within
+# CROSS_SOON - the same tints as a level that is near / reached.
+CROSS_NEAR = 10
+CROSS_SOON = 5
 
 STATUS_STYLE = {
     "Review": {"background": theme.NEGATIVE, "color": theme.SURFACE},
@@ -70,6 +85,8 @@ def _rules() -> mon.Rules:
                                      int)),
         ma_watch_days=_setting("MONITOR_MA_WATCH_DAYS", d.ma_watch_days, int),
         near_pct=_setting("MONITOR_NEAR_PCT", d.near_pct, float),
+        cross_horizon=max(1, _setting("MONITOR_CROSS_HORIZON",
+                                      d.cross_horizon, int)),
     )
 
 
@@ -112,6 +129,7 @@ def render():
             html.Div(id="mon-detail-title", style=theme.CARD_TITLE),
             dcc.Graph(id="mon-chart", config={"displayModeBar": False},
                       style={"height": "360px"}),
+            html.Div(id="mon-phase-note"),
             html.Div([
                 field("mon-buy-label", "mon-buy", type="number", min=0),
                 field("mon-sell-label", "mon-sell", type="number", min=0),
@@ -198,6 +216,8 @@ def _compute(store, _refresh):
             "high_date": r["high_date"].strftime("%Y-%m-%d"),
             "cross_date": (r["cross_date"].strftime("%Y-%m-%d")
                            if pd.notna(r["cross_date"]) else None),
+            "next_date": (r["next_date"].strftime("%Y-%m-%d")
+                          if pd.notna(r["next_date"]) else None),
         })
         rows.append(rec)
 
@@ -247,6 +267,7 @@ COLS = [  # key, label, align, sort key
     ("vs_ma", "vs 200d", "right", "vs_ma"),
     ("days_below_ma", "Below", "right", "days_below_ma"),
     ("cross", "50/200", "left", "cross_days"),
+    ("next", "Next cross", "left", "next_due"),
     ("buy", "Buy", "right", "dist_buy"),
     ("sell", "Sell", "right", "dist_sell"),
     ("review", "Review", "right", "dist_review"),
@@ -333,6 +354,7 @@ def _table(data, _clicks, sort):
             html.Td(f"{r['days_below_ma']}d" if r["days_below_ma"] else "\u2014",
                     style=num),
             _cross_cell(r, fast_days, ma_days, cell),
+            _next_cell(r, fast_days, ma_days, cell),
             _level_cell(r["buy_target"], r["dist_buy"], r["buy_state"],
                         r["unit"], num),
             _level_cell(r["sell_target"], r["dist_sell"], r["sell_state"],
@@ -350,8 +372,11 @@ def _table(data, _clicks, sort):
 
     note = html.Div("Bold = held \u00b7 \u25e6 = under a year of history \u00b7 "
                     "levels show the move needed to reach them; shaded when "
-                    "near, darker when reached \u00b7 hover a status for "
-                    "its reason",
+                    "near, darker when reached \u00b7 next cross = trading "
+                    f"days until the {fast_days}/{ma_days} cross if the price "
+                    f"stays flat; shaded within {CROSS_NEAR}, darker within "
+                    f"{CROSS_SOON} \u00b7 hover a status or a cross for "
+                    "the detail",
                     style={"fontSize": "10px", "color": theme.NEUTRAL,
                            "marginTop": "8px"})
     return html.Div([html.Table([head, html.Tbody(body)],
@@ -370,9 +395,9 @@ def _records(df):
 
 
 def _cross_cell(r, fast_days, ma_days, style):
-    """'Golden \u00b7 12d': the 50-day is above the 200-day, and crossed 12
-    days ago. '>390d' when there has been no cross as far back as both
-    averages exist."""
+    """'Golden \u00b7 12d \u00b7 Uptrend': the 50-day is above the 200-day,
+    crossed 12 days ago, and the price is above the 50-day. '>390d' when
+    there has been no cross as far back as both averages exist."""
     if not r["cross"]:
         return html.Td("\u2014", style={**style, "color": theme.NEUTRAL})
     golden = r["cross"] == "Golden"
@@ -383,10 +408,89 @@ def _cross_cell(r, fast_days, ma_days, style):
     title = (f"{fast_days}-day {'above' if golden else 'below'} the "
              f"{ma_days}-day{since} "
              f"({'golden' if golden else 'death'} cross)")
-    return html.Td(f"{r['cross']} \u00b7 {days}", title=title,
+    parts = [html.Span(f"{r['cross']} \u00b7 {days}")]
+    if r.get("phase"):
+        above = (r["vs_ma_fast"] or 0) >= 0
+        title += (f"; price {'above' if above else 'below'} the "
+                  f"{fast_days}-day: {r['phase']}")
+        parts.append(html.Span(f" \u00b7 {r['phase']}",
+                               style={"fontWeight": 400,
+                                      "color": theme.SLATE}))
+    return html.Td(parts, title=title,
                    style={**style, "fontWeight": 600,
                           "color": theme.POSITIVE if golden
                           else theme.NEGATIVE})
+
+
+def _next_cell(r, fast_days, ma_days, style):
+    """'Golden ~8d': with the price held flat, the 50-day crosses the
+    200-day in about 8 trading days. A dash when that is further out than
+    the horizon; the hover has the detail either way."""
+    if not r.get("next_cross"):
+        return html.Td("\u2014", style={**style, "color": theme.NEUTRAL})
+    title = _next_title(r, fast_days, ma_days)
+    if r["next_due"] is None:
+        return html.Td("\u2014", title=title,
+                       style={**style, "color": theme.NEUTRAL})
+    due = int(r["next_due"])
+    bg = (theme.TINT_HIT if due <= CROSS_SOON
+          else theme.TINT_NEAR if due <= CROSS_NEAR else None)
+    golden = r["next_cross"] == "Golden"
+    return html.Td(f"{r['next_cross']} ~{due}d", title=title,
+                   style={**style, "fontWeight": 600,
+                          "color": theme.POSITIVE if golden
+                          else theme.NEGATIVE,
+                          **({"background": bg} if bg else {})})
+
+
+def _next_title(r, fast_days, ma_days):
+    """Hover for the Next cross cell: the gap, the flat-price and trend
+    cases, and the flat price needed by day 10 and by the horizon."""
+    unit, price = r["unit"], r["price"]
+    kind = r["next_cross"].lower()
+    golden = kind == "golden"
+    gap = r["ma_gap"] or 0.0
+    lines = [f"{fast_days}-day {abs(gap):.1f}% "
+             f"{'above' if gap >= 0 else 'below'} the {ma_days}-day"]
+
+    if r["next_days"]:
+        k = int(r["next_days"])
+        when = (f" (around {pd.Timestamp(r['next_date']):%d %b %Y})"
+                if r["next_date"] else "")
+        line = (f"Price flat at {_price(price, unit)}: {kind} cross in "
+                f"~{k} trading days{when}")
+        if r["next_level"]:
+            rel = (price / r["next_level"] - 1) * 100
+            line += (f", the averages meeting near "
+                     f"{_price(r['next_level'], unit)} - price "
+                     f"{abs(rel):.1f}% {'above' if rel >= 0 else 'below'}")
+        lines.append(line)
+    else:
+        lines.append(f"Price flat at {_price(price, unit)}: no {kind} cross "
+                     f"within {mon.CROSS_LIMIT} trading days")
+
+    if r["trend_slope"] is not None:
+        lines.append(
+            f"Price on its {fast_days}-day trend "
+            f"({r['trend_slope']:+.2f}% a day): "
+            + (f"~{int(r['trend_days'])} trading days" if r["trend_days"]
+               else f"no {kind} cross within {mon.CROSS_LIMIT} trading days"))
+
+    side = "at or above" if golden else "at or below"
+    needs = []
+    for k, be in ((r["be_near_k"], r["be_near"]), (r["be_far_k"], r["be_far"])):
+        if not k or be is None:
+            continue
+        k = int(k)
+        if be <= 0:
+            needs.append(f"by day {k}: at any price" if golden
+                         else f"by day {k}: not possible")
+        else:
+            needs.append(f"by day {k}: price {side} {_price(be, unit)} "
+                         f"({(be / price - 1) * 100:+.1f}%)")
+    if needs:
+        lines.append(f"{kind.title()} cross " + "; ".join(needs))
+    return "\n".join(lines)
 
 
 def _level_cell(level, dist, state, unit, style):
@@ -440,6 +544,7 @@ def _select(clicks, selected):
     Output("mon-sell-label", "children"),
     Output("mon-review-label", "children"),
     Output("mon-msg", "children", allow_duplicate=True),
+    Output("mon-phase-note", "children"),
     Input("mon-selected", "data"),
     Input("mon-rows", "data"),
     prevent_initial_call=True,
@@ -449,19 +554,54 @@ def _detail(selected, data):
     hidden = {"display": "none"}
     if not selected or selected not in rows:
         return (hidden, "", go.Figure(), None, None, None, "",
-                "", "", "", "")
+                "", "", "", "", "")
     r = rows[selected]
     unit = r["unit"]
+    ma_days = data.get("ma_days", 200)
+    fast_days = data.get("ma_fast_days", 50)
     shown = {**theme.CARD, "display": "block"}
     msg = "" if ctx.triggered_id == "mon-selected" else no_update
     return (shown, f"{r['name']} \u00b7 {r['status']}"
-                   + (f" \u2014 {r['reasons']}" if r["reasons"] else ""),
-            _chart(selected, r, data.get("ma_days", 200),
-                   data.get("ma_fast_days", 50)),
+                   + (f" \u2014 {r['reasons']}" if r["reasons"] else "")
+                   + (f" \u00b7 {r['phase']} phase" if r.get("phase") else ""),
+            _chart(selected, r, ma_days, fast_days),
             r["buy_target"], r["sell_target"], r["review_level"],
             r["note"] or "",
             f"Buy target ({unit})", f"Sell target ({unit})",
-            f"Review level ({unit})", msg)
+            f"Review level ({unit})", msg,
+            _phase_note(r.get("phase"), fast_days, ma_days))
+
+
+def _phase_note(current, fast_days, ma_days):
+    """The four trend phases under the chart, the instrument's own one
+    highlighted, and a line on what crosses can and cannot tell you."""
+    small = {"fontSize": "11px", "lineHeight": "1.5"}
+    rows = []
+    for name, text in mon.PHASE_TEXT:
+        on = name == current
+        rows.append(html.Div([
+            html.Span(name, style={"display": "inline-block", "width": "82px",
+                                   "fontWeight": 700,
+                                   "color": theme.INK if on else theme.TEXT}),
+            html.Span(text.format(fast=fast_days, slow=ma_days)),
+        ], style={**small, "color": theme.INK if on else theme.SLATE,
+                  "padding": "1px 6px", "borderRadius": "4px",
+                  **({"background": theme.TINT_NEAR} if on else {})}))
+    return html.Div([
+        html.Div(f"Trend phase \u2014 where the price sits against the "
+                 f"{fast_days}-day average, and the {fast_days}-day against "
+                 f"the {ma_days}-day",
+                 style={**small, "fontWeight": 600, "color": theme.TEXT,
+                        "marginBottom": "2px"}),
+        *rows,
+        html.Div("Crosses lag turning points by weeks to months: they "
+                 "confirm what the price has already done rather than "
+                 "forecast it, and much of their timing is set by old prices "
+                 "leaving the averages.",
+                 style={**small, "color": theme.NEUTRAL, "marginTop": "3px",
+                        "padding": "0 6px"}),
+    ], style={"margin": "6px 0 10px",
+              "borderTop": f"1px solid {theme.LINE_SOFT}", "paddingTop": "8px"})
 
 
 def _chart(fund_id, r, ma_days, fast_days=50):
