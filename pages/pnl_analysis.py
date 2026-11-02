@@ -16,6 +16,8 @@ top-level page, so it must stay out of dash.page_registry and the top bar.
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html
@@ -64,12 +66,13 @@ def get_data() -> dict:
     """
     members = compute_all()
     _, approx, unpriceable = load_latest_prices()
+    asof = pd.Timestamp.today().normalize()
     return dict(
         trades=load_trades(),
         members=members,
-        rows=positions_to_rows(members),
+        rows=positions_to_rows(members, asof),
         by_id={p.instrument: p for p in members},
-        asof=pd.Timestamp.today().normalize(),
+        asof=asof,
         approx=approx,
         unpriceable=unpriceable,
         n_closed=sum(1 for p in members if p.status == "closed"),
@@ -94,19 +97,28 @@ NEG_FILL = ["#fef2f2", "#fee2e2", "#fecaca", "#f87171"]
 RATE_EDGES = [0.05, 0.15, 0.30]
 
 
-def _rate_bands(col: str) -> list[dict]:
+def _rate_bands(col: str, *, reverse: bool = False,
+                optional: bool = False) -> list[dict]:
     """Graduated green/red fill, strongest at the extremes.
 
     Edges are fractions because the column holds 0.059 for 5.9%.
+
+    reverse=True swaps the colours, for a column where a rise is bad news
+    (the price going up after you sold). optional=True is for a column that
+    can be blank: every rule gets an "is num" guard, because the table's
+    filter compares a blank as if it were 0 and would otherwise paint it
+    with the 0-5% band.
     """
+    pos, neg = (NEG_FILL, POS_FILL) if reverse else (POS_FILL, NEG_FILL)
+    guard = f"{{{col}}} is num && " if optional else ""
     out: list[dict] = []
     bounds = [0.0] + RATE_EDGES
     for i in range(len(RATE_EDGES)):
         lo, hi = bounds[i], bounds[i + 1]
         out.append({
-            "if": {"filter_query": f"{{{col}}} >= {lo} && {{{col}}} < {hi}",
+            "if": {"filter_query": f"{guard}{{{col}}} >= {lo} && {{{col}}} < {hi}",
                    "column_id": col},
-            "backgroundColor": POS_FILL[i],
+            "backgroundColor": pos[i],
         })
         # Mirror of the positive band, half-open the other way: (-hi, -lo].
         # Strict "<" at the zero end keeps 0.0 in the positive band only, and
@@ -114,15 +126,57 @@ def _rate_bands(col: str) -> list[dict]:
         # (-0.05, -0.15) falling through with no colour at all.
         near = f"{{{col}}} < {-lo}" if lo == 0.0 else f"{{{col}}} <= {-lo}"
         out.append({
-            "if": {"filter_query": f"{near} && {{{col}}} > {-hi}",
+            "if": {"filter_query": f"{guard}{near} && {{{col}}} > {-hi}",
                    "column_id": col},
-            "backgroundColor": NEG_FILL[i],
+            "backgroundColor": neg[i],
         })
     top = RATE_EDGES[-1]
-    out.append({"if": {"filter_query": f"{{{col}}} >= {top}", "column_id": col},
-                "backgroundColor": POS_FILL[-1]})
-    out.append({"if": {"filter_query": f"{{{col}}} <= {-top}", "column_id": col},
-                "backgroundColor": NEG_FILL[-1]})
+    out.append({"if": {"filter_query": f"{guard}{{{col}}} >= {top}", "column_id": col},
+                "backgroundColor": pos[-1]})
+    out.append({"if": {"filter_query": f"{guard}{{{col}}} <= {-top}", "column_id": col},
+                "backgroundColor": neg[-1]})
+    return out
+
+
+# --------------------------------------------------------------------------
+# Last buy / last sell. The dates are coloured by age, to build two habits:
+# buying regularly (a recent buy is green, a year without one is red) and
+# holding without selling (a recent sale is red, three months without one is
+# green). Closed rows get no date colour - there is nothing left to hold.
+# Bands are (lo, hi] in days; hi=None is open-ended; gaps get no colour.
+# --------------------------------------------------------------------------
+
+BUY_AGE_BANDS = [
+    (None, 30, POS_FILL[2]),
+    (30, 90, POS_FILL[1]),
+    # 91-180 days: no colour
+    (180, 365, NEG_FILL[1]),
+    (365, None, NEG_FILL[2]),
+]
+SELL_AGE_BANDS = [
+    (None, 30, NEG_FILL[2]),
+    (30, 60, NEG_FILL[1]),
+    (60, 90, POS_FILL[1]),
+    (90, None, POS_FILL[2]),
+]
+# A holding with no sale since it was opened turns green after this many days.
+HOLD_GREEN_DAYS = 90
+# A mark older than this is treated as out of date: the return is still shown,
+# greyed out, with the price date on hover.
+STALE_MARK_DAYS = 7
+
+
+def _age_bands(age_col: str, show_col: str, bands) -> list[dict]:
+    """Fill `show_col` by the day count in hidden `age_col`. -1 = no colour."""
+    out = []
+    for lo, hi, fill in bands:
+        q = [f"{{{age_col}}} >= 0"]
+        if lo is not None:
+            q.append(f"{{{age_col}}} > {lo}")
+        if hi is not None:
+            q.append(f"{{{age_col}}} <= {hi}")
+        out.append({"if": {"filter_query": " && ".join(q), "column_id": show_col},
+                    "backgroundColor": fill})
     return out
 
 
@@ -139,7 +193,7 @@ TABLE_STYLE = dict(
     style_as_list_view=False,
     style_table={"overflowX": "auto"},
     style_cell={
-        "padding": "4px 10px",
+        "padding": "4px 6px",
         "fontSize": "12.5px",
         "fontFamily": "system-ui, sans-serif",
         "textAlign": "right",
@@ -152,13 +206,20 @@ TABLE_STYLE = dict(
         "fontWeight": 600,
         "fontSize": "12px",
         "border": "none",
-        "padding": "8px 10px",
+        "padding": "6px 6px",
     },
+    # Two header rows: the group names on top, centred and quieter.
+    style_header_conditional=[
+        {"if": {"header_index": 0}, "textAlign": "center", "color": "#9ca3af",
+         "fontWeight": 500, "fontSize": "11px", "paddingBottom": "0px"},
+    ],
     style_cell_conditional=[
-        {"if": {"column_id": "name"}, "textAlign": "left", "minWidth": "230px",
+        {"if": {"column_id": "name"}, "textAlign": "left", "minWidth": "200px",
          "fontWeight": 500},
-        {"if": {"column_id": "status"}, "textAlign": "left", "width": "70px"},
+        {"if": {"column_id": "status"}, "textAlign": "left", "width": "60px"},
         {"if": {"column_id": "net_cost"}, "color": "#9ca3af"},
+        {"if": {"column_id": ["last_buy", "last_sell"]}, "textAlign": "center",
+         "fontVariantNumeric": "tabular-nums"},
     ],
     style_data_conditional=(
         _rate_bands("roce_total")
@@ -177,44 +238,151 @@ TABLE_STYLE = dict(
             {"if": {"filter_query": "{status} = closed", "column_id": "status"},
              "color": "#9ca3af", "fontStyle": "italic"},
         ]
+        # After the closed-row rule, so closed rows keep their return colours:
+        # for a position you have exited, the move since the sale is the
+        # number worth seeing. Date colours are already off for closed rows
+        # (their ages are -1).
+        + _age_bands("_buy_age", "last_buy", BUY_AGE_BANDS)
+        + _age_bands("_sell_age", "last_sell", SELL_AGE_BANDS)
+        + [{"if": {"filter_query": f"{{_hold_age}} > {HOLD_GREEN_DAYS}",
+                   "column_id": "last_sell"},
+            "backgroundColor": SELL_AGE_BANDS[-1][2]}]
+        + _rate_bands("ret_buy", optional=True)
+        # Reversed: the price rising after you sold means the sale cost you.
+        + _rate_bands("ret_sell", reverse=True, optional=True)
+        + [{"if": {"filter_query": "{_stale} = 1", "column_id": c},
+            "color": "#9ca3af", "fontStyle": "italic",
+            "backgroundColor": "transparent"}
+           for c in ("ret_buy", "ret_sell")]
     ),
 )
 
 
+_INT = Format(precision=0, scheme=Scheme.fixed, group=Group.yes)
+_PCT = Format(precision=1, scheme=Scheme.percentage)
+
+# Two-row headers: a group name over short column names. Adjacent identical
+# top names merge into one cell (merge_duplicate_headers on the table).
 TABLE_COLUMNS = [
-    dict(id="name", name="Instrument", type="text"),
-    dict(id="status", name="Status", type="text"),
-    dict(id="qty", name="Qty", type="numeric",
-         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="net_cost", name="Net cost", type="text"),
-    dict(id="days_deployed", name="Days deployed", type="numeric",
-         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="avg_capital", name="Avg capital £", type="numeric",
-         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="peak_capital", name="Peak capital £", type="numeric",
-         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="realised", name="Realised £", type="numeric",
-         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="unrealised", name="Unrealised £", type="numeric",
-         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="fx_pnl", name="of which FX £", type="numeric",
-         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="total_pnl", name="Total P&L £", type="numeric",
-         format=Format(precision=0, scheme=Scheme.fixed, group=Group.yes)),
-    dict(id="roce_total", name="ROCE", type="numeric",
-         format=Format(precision=1, scheme=Scheme.percentage)),
-    dict(id="roce_annualised", name="Annualised", type="numeric",
-         format=Format(precision=1, scheme=Scheme.percentage)),
+    dict(id="name", name=["", "Instrument"], type="text"),
+    dict(id="status", name=["", "Status"], type="text"),
+    dict(id="qty", name=["", "Qty"], type="numeric", format=_INT),
+    dict(id="net_cost", name=["", "Net cost"], type="text"),
+    dict(id="days_deployed", name=["Capital employed", "Days"], type="numeric",
+         format=_INT),
+    dict(id="avg_capital", name=["Capital employed", "Avg £"], type="numeric",
+         format=_INT),
+    dict(id="peak_capital", name=["Capital employed", "Peak £"], type="numeric",
+         format=_INT),
+    dict(id="realised", name=["P&L £", "Realised"], type="numeric", format=_INT),
+    dict(id="unrealised", name=["P&L £", "Unrealised"], type="numeric",
+         format=_INT),
+    dict(id="fx_pnl", name=["P&L £", "of which FX"], type="numeric",
+         format=_INT),
+    dict(id="total_pnl", name=["P&L £", "Total"], type="numeric", format=_INT),
+    # Not "Total": it would sit next to P&L's "Total" and the two merge.
+    dict(id="roce_total", name=["ROCE", "To date"], type="numeric", format=_PCT),
+    dict(id="roce_annualised", name=["ROCE", "Annualised"], type="numeric",
+         format=_PCT),
+    # ISO dates sort correctly as text; "—" (no such trade) sorts after them.
+    dict(id="last_buy", name=["Last buy", "Date"], type="text"),
+    dict(id="ret_buy", name=["Last buy", "Return"], type="numeric",
+         format=_PCT),
+    dict(id="last_sell", name=["Last sell", "Date"], type="text"),
+    dict(id="ret_sell", name=["Last sell", "Return"], type="numeric",
+         format=_PCT),
 ]
 
 
-def positions_to_rows(members: list[Position]) -> list[dict]:
+# Words that make a name long without telling holdings apart. Display only:
+# the search box still matches the full name and the id.
+_NAME_FILLER = re.compile(
+    r"\s+(?:UCITS ETF|UCITS|Corporation|Corp\.?|Inc\.?|plc|PLC|A\.S\.|S\.A\.)"
+    r"(?=\s|$)"
+)
+_CCY_BEFORE_TICKER = re.compile(r"\s+(?:USD|GBP|EUR)(?=\s*\()")
+
+
+def short_name(name: str) -> str:
+    """'iShares Nasdaq US Biotechnology UCITS ETF GBP (BTEK.L)' ->
+    'iShares Nasdaq US Biotechnology (BTEK.L)'."""
+    s = _CCY_BEFORE_TICKER.sub("", _NAME_FILLER.sub("", name or ""))
+    return re.sub(r"\s{2,}", " ", s).strip() or (name or "")
+
+
+def _days(d, asof: pd.Timestamp) -> int:
+    """Whole days from d to asof; -1 when there is no date."""
+    if d is None or pd.isna(d):
+        return -1
+    return int((asof - pd.Timestamp(d).normalize()).days)
+
+
+def _iso(d) -> str:
+    return "—" if d is None or pd.isna(d) else f"{pd.Timestamp(d):%Y-%m-%d}"
+
+
+def _ago(n: int) -> str:
+    return "today" if n == 0 else "1 day ago" if n == 1 else f"{n:,} days ago"
+
+
+def trade_cells(p: Position, asof: pd.Timestamp) -> dict:
+    """The four last-trade columns for one position, plus the hidden fields
+    their colours and hover text read.
+
+    _buy_age / _sell_age  days since the last buy / sell; -1 = no colour
+                          (closed position, or no such trade)
+    _hold_age             days held with no sale since the holding opened;
+                          -1 unless that applies. Covers both "never sold" and
+                          "sold out once, bought back, not sold since".
+    _stale                1 when the mark is older than STALE_MARK_DAYS
+    """
+    held = p.qty > 0
+    sold_in_holding = (held and p.last_sell_date is not None
+                       and p.held_since is not None
+                       and p.last_sell_date >= p.held_since)
+    mark_age = _days(p.mark_date, asof)
+    return {
+        "last_buy": _iso(p.last_buy_date),
+        "ret_buy": p.ret_since_buy,
+        "last_sell": _iso(p.last_sell_date),
+        "ret_sell": p.ret_since_sell,
+        "_buy_age": _days(p.last_buy_date, asof) if held else -1,
+        "_sell_age": _days(p.last_sell_date, asof) if sold_in_holding else -1,
+        "_hold_age": (_days(p.held_since, asof)
+                      if held and not sold_in_holding else -1),
+        "_stale": int(mark_age > STALE_MARK_DAYS),
+        "_mark_date": _iso(p.mark_date),
+    }
+
+
+def tooltips(rows: list[dict], asof: pd.Timestamp) -> list[dict]:
+    """Hover text for the last-trade cells, one dict per row, same order."""
+    out = []
+    for r in rows:
+        t = {}
+        for col in ("last_buy", "last_sell"):
+            if r.get(col, "—") != "—":
+                t[col] = _ago(_days(pd.Timestamp(r[col]), asof))
+        if r.get("_hold_age", -1) >= 0:
+            t["last_sell"] = (("Last sold before this holding opened. "
+                               if r.get("last_sell", "—") != "—"
+                               else "Never sold. ")
+                              + f"Held {r['_hold_age']:,} days without selling")
+        if r.get("_stale"):
+            note = f"Price from {r['_mark_date']}, so this may be out of date"
+            t["ret_buy"] = t["ret_sell"] = note
+        out.append(t)
+    return out
+
+
+def positions_to_rows(members: list[Position], asof: pd.Timestamp) -> list[dict]:
     instruments = repo.instruments()
     rows = []
     for p in members:
         rows.append({
             "id": p.instrument,
-            "name": p.name,
+            "name": short_name(p.name),
+            "_full_name": p.name,
             "status": p.status,
             "qty": p.qty,
             "net_cost": fin.fmt_native_cost(
@@ -229,7 +397,10 @@ def positions_to_rows(members: list[Position]) -> list[dict]:
             "total_pnl": p.total_pnl,
             "roce_total": p.roce_total,
             "roce_annualised": p.roce_annualised,
-            "_short": p.days_deployed < MIN_DAYS_TO_ANNUALISE,
+            # 1/0, not True/False: the table's filter "{_short} = 1" never
+            # matches a boolean, so short holdings were never greyed out.
+            "_short": int(p.days_deployed < MIN_DAYS_TO_ANNUALISE),
+            **trade_cells(p, asof),
         })
     return rows
 
@@ -299,6 +470,10 @@ def _render_inner() -> html.Div:
                 selected_row_ids=[],
                 sort_action="native",
                 page_action="none",
+                merge_duplicate_headers=True,
+                tooltip_data=tooltips(data["rows"], data["asof"]),
+                tooltip_delay=300,
+                tooltip_duration=None,
                 **TABLE_STYLE,
             ),
 
@@ -355,6 +530,7 @@ def render() -> html.Div:
 
 @callback(
     Output(PREFIX + "table", "data"),
+    Output(PREFIX + "table", "tooltip_data"),
     Output(PREFIX + "toggle-closed", "children"),
     Input(PREFIX + "search", "value"),
     Input(PREFIX + "toggle-closed", "n_clicks"),
@@ -365,6 +541,8 @@ def filter_rows(term, n_clicks, _version):
 
     Hiding a closed row does not deselect it - track_selection keeps picks that
     are currently out of view, so a basket can mix open and closed positions.
+
+    tooltip_data is positional, so it is rebuilt from the same filtered list.
     """
     data = get_data()
     show_closed = bool((n_clicks or 0) % 2)
@@ -374,10 +552,11 @@ def filter_rows(term, n_clicks, _version):
         rows = [r for r in rows if r["status"] == "open"]
     if term:
         t = term.lower()
-        rows = [r for r in rows if t in r["name"].lower() or t in r["id"].lower()]
+        rows = [r for r in rows
+                if t in r["_full_name"].lower() or t in r["id"].lower()]
 
     label = "Hide closed" if show_closed else f"Show closed ({data['n_closed']})"
-    return rows, label
+    return rows, tooltips(rows, data["asof"]), label
 
 
 @callback(

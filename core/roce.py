@@ -120,7 +120,8 @@ def load_trades() -> pd.DataFrame:
 
     Returns columns: date, instrument, name, type, qty (signed, always 0 for
     DIVIDEND), cash_flow (signed: negative on a buy, positive on a sell or a
-    dividend).
+    dividend), cash_flow_native, currency, px_native (fill price per unit in
+    major units of the trade currency, before commission).
 
     DIVIDEND rows carry the cash amount in raw_qty with price pinned to 1.0
     by add_transaction - the same convention core.finance.position_pnl
@@ -165,9 +166,15 @@ def load_trades() -> pd.DataFrame:
         df["qty"] > 0, gross_native - comm_native
     )
 
+    # The fill price itself, in major units of the trade currency and before
+    # commission. Feeds the "since last buy / sell" returns only; nothing in
+    # the P&L walk reads it. Blank on DIVIDEND rows, whose price is a 1.0
+    # placeholder rather than a price.
+    df["px_native"] = (df["price"] / unit).where(~is_div)
+
     return df[
         ["date", "instrument", "name", "type", "qty", "cash_flow",
-         "cash_flow_native", "currency"]
+         "cash_flow_native", "currency", "px_native"]
     ].dropna(subset=["qty", "cash_flow"])
 
 
@@ -268,6 +275,37 @@ class Position:
     # position has paid for itself. 0.0 when nothing is held.
     net_cost_native: float = 0.0
 
+    # Start of the current holding: the date qty last went from zero to
+    # positive. None when nothing is held.
+    held_since: pd.Timestamp | None = None
+
+    # Last trade on each side, for the "since last buy / sell" columns. Dates
+    # are trade dates. Prices are the fill in the instrument's own major unit
+    # (pounds, dollars, lira - never pence), before commission, weighted by
+    # quantity when several fills share that date. None when there is no such
+    # trade, or the ledger has no usable price for it.
+    last_buy_date: pd.Timestamp | None = None
+    last_buy_px: float | None = None
+    last_sell_date: pd.Timestamp | None = None
+    last_sell_px: float | None = None
+
+    # Today's price on the same basis as those fills, and the date of the close
+    # it came from. None when there is no mark.
+    mark_native: float | None = None
+    mark_date: pd.Timestamp | None = None
+
+    @property
+    def ret_since_buy(self) -> float | None:
+        """Price move from the last buy to today, in the instrument's own
+        currency. Dividends and FX are not in it."""
+        return _since(self.mark_native, self.last_buy_px)
+
+    @property
+    def ret_since_sell(self) -> float | None:
+        """Price move from the last sell to today. Positive means the price
+        has risen since you sold."""
+        return _since(self.mark_native, self.last_sell_px)
+
     @property
     def status(self) -> str:
         if self.error:
@@ -275,6 +313,34 @@ class Position:
         if not self.priced:
             return "unpriced"
         return "closed" if self.qty == 0 else "open"
+
+
+def _since(mark: float | None, fill: float | None) -> float | None:
+    """Simple return from a fill price to the mark. None if either is missing."""
+    if mark is None or fill is None or pd.isna(mark) or pd.isna(fill) or fill <= 0:
+        return None
+    return float(mark) / float(fill) - 1.0
+
+
+def _last_fill(side: pd.DataFrame) -> tuple[pd.Timestamp | None, float | None]:
+    """(date, price) of the latest trade in `side` - all buys or all sells.
+
+    Several fills on that date are combined into one quantity-weighted price.
+    Fills with no usable price are skipped; if none is usable the date is
+    still returned, with price None.
+    """
+    if side.empty:
+        return None, None
+    day = side[side["date"] == side["date"].max()]
+    date = pd.Timestamp(day["date"].iloc[0])
+    if "px_native" not in day.columns:
+        return date, None
+    qty = day["qty"].abs()
+    px = day["px_native"]
+    ok = px.notna() & (px > 0) & (qty > 0)
+    if not ok.any():
+        return date, None
+    return date, float((qty[ok] * px[ok]).sum() / qty[ok].sum())
 
 
 def compute_position(
@@ -287,6 +353,7 @@ def compute_position(
     currency: str = "GBP",
     native_latest_price: float | None = None,
     fx_now: float = 1.0,
+    mark_date: pd.Timestamp | None = None,
 ) -> Position:
     """Run weighted-average-cost over one instrument's full ledger.
 
@@ -305,11 +372,14 @@ def compute_position(
     t = t.sort_values(["date", "_order"], kind="stable")
 
     qty = book = realised = cost_of_sold = 0.0
+    held_since: pd.Timestamp | None = None
     realised_events: list[tuple[pd.Timestamp, float]] = []
     book_points: list[tuple[pd.Timestamp, float]] = []
 
     for row in t.itertuples():
         if row.qty > 0:
+            if qty == 0:
+                held_since = pd.Timestamp(row.date)
             book += -row.cash_flow          # cash_flow is negative on a buy
             qty += row.qty
         elif row.qty < 0:
@@ -340,6 +410,7 @@ def compute_position(
         # Snap float dust to zero so a flat position reads as genuinely flat.
         if abs(qty) < 1e-9:
             qty = book = 0.0
+            held_since = None
 
         book_points.append((row.date, book))
 
@@ -403,6 +474,15 @@ def compute_position(
             local_pnl_gbp = (nrealised + nunrealised) / fx_now if fx_now else 0.0
             fx_pnl = total_pnl - local_pnl_gbp
 
+    # Last buy / last sell, and the mark they are measured against. For a GBP
+    # position that is the same GBP mark the unrealised column uses; for any
+    # other currency it is the native close fx_pnl uses. Either way it is on
+    # the ledger price's own scale, so the ratio needs no FX.
+    buys, sells = t[t["qty"] > 0], t[t["qty"] < 0]
+    last_buy_date, last_buy_px = _last_fill(buys)
+    last_sell_date, last_sell_px = _last_fill(sells)
+    mark_native = latest_price if currency == "GBP" else native_latest_price
+
     return Position(
         instrument=instrument,
         name=name,
@@ -423,6 +503,13 @@ def compute_position(
         currency=currency,
         fx_pnl=fx_pnl,
         net_cost_native=net_cost_native,
+        held_since=held_since,
+        last_buy_date=last_buy_date,
+        last_buy_px=last_buy_px,
+        last_sell_date=last_sell_date,
+        last_sell_px=last_sell_px,
+        mark_native=float(mark_native) if mark_native is not None else None,
+        mark_date=pd.Timestamp(mark_date) if mark_date is not None else None,
         # Built from the list, not dict(...): two sells on the same date are two
         # events, and dict() would keep only the last one.
         realised_events=(
@@ -434,9 +521,11 @@ def compute_position(
     )
 
 
-def _native_fx_context() -> tuple[dict[str, float], dict[str, float]]:
-    """Native latest price (major units, no FX) per instrument, and current
-    FX rates per currency code. Used only for fx_pnl - the GBP marks from
+def _native_fx_context() -> tuple[dict[str, float], dict[str, float],
+                                  dict[str, pd.Timestamp]]:
+    """Native latest price (major units, no FX) per instrument, current FX
+    rates per currency code, and the date of each instrument's latest close.
+    Used for fx_pnl and the since-last-trade returns - the GBP marks from
     load_latest_prices() are untouched. Re-reads latest_prices()/instruments()
     rather than extending load_latest_prices()'s return shape, which three
     test call sites and the page unpack as an exact 3-tuple.
@@ -452,14 +541,19 @@ def _native_fx_context() -> tuple[dict[str, float], dict[str, float]]:
         unit = 100.0 if punit in MINOR_UNITS else 1.0
         native_prices[fund_id] = raw / unit
 
-    return native_prices, rates
+    mark_dates: dict[str, pd.Timestamp] = {}
+    if not price_frame.empty:
+        latest = pd.to_datetime(price_frame["date"]).groupby(price_frame["fund_id"]).max()
+        mark_dates = latest.to_dict()
+
+    return native_prices, rates, mark_dates
 
 
 def compute_all(asof: pd.Timestamp | None = None) -> list[Position]:
     """Run the engine over every instrument in the ledger."""
     trades = load_trades()
     prices, _approx, _unpriceable = load_latest_prices()
-    native_prices, fx_rates_now = _native_fx_context()
+    native_prices, fx_rates_now, mark_dates = _native_fx_context()
     asof = pd.Timestamp(asof or pd.Timestamp.today().normalize())
 
     out = []
@@ -480,6 +574,7 @@ def compute_all(asof: pd.Timestamp | None = None) -> list[Position]:
                     currency=currency,
                     native_latest_price=native_prices.get(instrument),
                     fx_now=fx_rates_now.get(currency, 1.0),
+                    mark_date=mark_dates.get(instrument),
                 )
             )
         except ValueError as exc:
