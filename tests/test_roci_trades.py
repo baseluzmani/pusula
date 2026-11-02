@@ -200,7 +200,8 @@ def _cells(rows, latest=11.0, mark_date="2026-10-30"):
 
 def test_cells_for_a_held_position_trimmed_recently():
     c = _cells([("2026-01-05", 100, 10.0), ("2026-10-20", -20, 10.5)])
-    assert c["last_buy"] == "2026-01-05" and c["last_sell"] == "2026-10-20"
+    assert c["last_buy"] == 301 and c["last_sell"] == 13       # shown 301d / 13d
+    assert c["_buy_on"] == "05 Jan 2026" and c["_sell_on"] == "20 Oct 2026"
     assert c["_buy_age"] == 301
     assert c["_sell_age"] == 13
     assert c["_hold_age"] == -1
@@ -209,7 +210,7 @@ def test_cells_for_a_held_position_trimmed_recently():
 
 def test_cells_for_a_never_sold_holding():
     c = _cells([("2026-07-01", 100, 10.0)])
-    assert c["last_sell"] == "—" and c["ret_sell"] is None
+    assert c["last_sell"] is None and c["ret_sell"] is None    # shown as a dash
     assert c["_sell_age"] == -1
     assert c["_hold_age"] == 124
 
@@ -224,6 +225,7 @@ def test_cells_for_a_holding_bought_back_after_an_exit():
 def test_cells_for_a_closed_position_have_no_date_colour():
     c = _cells([("2025-07-28", 1000, 14.0), ("2026-06-25", -1000, 14.6)])
     assert (c["_buy_age"], c["_sell_age"], c["_hold_age"]) == (-1, -1, -1)
+    assert c["last_sell"] == 130, "the age still shows, only the colour is off"
     assert c["ret_sell"] == pytest.approx(11.0 / 14.6 - 1)
 
 
@@ -231,18 +233,22 @@ def test_old_mark_is_flagged_stale():
     c = _cells([("2026-07-01", 100, 10.0)], mark_date="2026-10-06")
     assert c["_stale"] == 1
     from pages.pnl_analysis import tooltips
-    tip = tooltips([c], ASOF)[0]
-    assert "2026-10-06" in tip["ret_buy"]
+    tip = tooltips([c])[0]
+    assert "06 Oct 2026" in tip["ret_buy"]
 
 
-def test_tooltips_say_how_long_ago():
+def test_tooltips_give_the_dates():
     from pages.pnl_analysis import tooltips
     c = _cells([("2026-01-05", 100, 10.0), ("2026-10-20", -20, 10.5)])
-    tip = tooltips([c], ASOF)[0]
-    assert tip["last_buy"] == "301 days ago"
-    assert tip["last_sell"] == "13 days ago"
-    never = tooltips([_cells([("2026-07-01", 100, 10.0)])], ASOF)[0]
+    tip = tooltips([c])[0]
+    assert tip["last_buy"] == "Bought 05 Jan 2026"
+    assert tip["last_sell"] == "Sold 20 Oct 2026"
+    never = tooltips([_cells([("2026-07-01", 100, 10.0)])])[0]
     assert never["last_sell"] == "Never sold. Held 124 days without selling"
+    back = tooltips([_cells([("2025-11-20", 800, 5.8), ("2026-03-17", -800, 7.3),
+                             ("2026-05-07", 1000, 8.1)])])[0]
+    assert back["last_sell"] == ("Sold 17 Mar 2026, before this holding opened. "
+                                 "Held 179 days without selling")
 
 
 def test_age_bands_never_colour_a_blank():

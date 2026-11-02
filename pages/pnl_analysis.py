@@ -21,7 +21,7 @@ import re
 import pandas as pd
 import plotly.graph_objects as go
 from dash import Input, Output, State, callback, ctx, dash_table, dcc, html
-from dash.dash_table.Format import Format, Group, Scheme
+from dash.dash_table.Format import Format, Group, Scheme, Symbol
 
 from core import finance as fin
 from core.repo import portfolio as repo
@@ -219,7 +219,7 @@ TABLE_STYLE = dict(
         {"if": {"column_id": "status"}, "textAlign": "left", "width": "60px"},
         {"if": {"column_id": "net_cost"}, "color": "#9ca3af"},
         {"if": {"column_id": ["last_buy", "last_sell"]}, "textAlign": "center",
-         "fontVariantNumeric": "tabular-nums"},
+         "fontVariantNumeric": "tabular-nums", "minWidth": "52px"},
     ],
     style_data_conditional=(
         _rate_bands("roce_total")
@@ -260,6 +260,10 @@ TABLE_STYLE = dict(
 
 _INT = Format(precision=0, scheme=Scheme.fixed, group=Group.yes)
 _PCT = Format(precision=1, scheme=Scheme.percentage)
+# Days since a trade, shown as "3d". Numeric, so the column sorts by age; a
+# blank (no such trade) shows as a dash.
+_AGO = Format(precision=0, scheme=Scheme.fixed, group=Group.yes,
+              symbol=Symbol.yes, symbol_suffix="d", nully="\u2014")
 
 # Two-row headers: a group name over short column names. Adjacent identical
 # top names merge into one cell (merge_duplicate_headers on the table).
@@ -284,11 +288,11 @@ TABLE_COLUMNS = [
     dict(id="roce_total", name=["ROCE", "To date"], type="numeric", format=_PCT),
     dict(id="roce_annualised", name=["ROCE", "Annualised"], type="numeric",
          format=_PCT),
-    # ISO dates sort correctly as text; "—" (no such trade) sorts after them.
-    dict(id="last_buy", name=["Last buy", "Date"], type="text"),
+    # How long ago, as "3d"; the date itself is in the hover text.
+    dict(id="last_buy", name=["Last buy", "Ago"], type="numeric", format=_AGO),
     dict(id="ret_buy", name=["Last buy", "Return"], type="numeric",
          format=_PCT),
-    dict(id="last_sell", name=["Last sell", "Date"], type="text"),
+    dict(id="last_sell", name=["Last sell", "Ago"], type="numeric", format=_AGO),
     dict(id="ret_sell", name=["Last sell", "Return"], type="numeric",
          format=_PCT),
 ]
@@ -317,18 +321,17 @@ def _days(d, asof: pd.Timestamp) -> int:
     return int((asof - pd.Timestamp(d).normalize()).days)
 
 
-def _iso(d) -> str:
-    return "—" if d is None or pd.isna(d) else f"{pd.Timestamp(d):%Y-%m-%d}"
-
-
-def _ago(n: int) -> str:
-    return "today" if n == 0 else "1 day ago" if n == 1 else f"{n:,} days ago"
+def _on(d) -> str | None:
+    """'30 Oct 2026', or None when there is no date."""
+    return None if d is None or pd.isna(d) else f"{pd.Timestamp(d):%d %b %Y}"
 
 
 def trade_cells(p: Position, asof: pd.Timestamp) -> dict:
     """The four last-trade columns for one position, plus the hidden fields
     their colours and hover text read.
 
+    last_buy / last_sell  days since the trade (None = never), shown as "3d"
+    _buy_on / _sell_on    the trade dates, for the hover text
     _buy_age / _sell_age  days since the last buy / sell; -1 = no colour
                           (closed position, or no such trade)
     _hold_age             days held with no sale since the holding opened;
@@ -342,34 +345,36 @@ def trade_cells(p: Position, asof: pd.Timestamp) -> dict:
                        and p.last_sell_date >= p.held_since)
     mark_age = _days(p.mark_date, asof)
     return {
-        "last_buy": _iso(p.last_buy_date),
+        "last_buy": _days(p.last_buy_date, asof) if p.last_buy_date is not None else None,
         "ret_buy": p.ret_since_buy,
-        "last_sell": _iso(p.last_sell_date),
+        "last_sell": _days(p.last_sell_date, asof) if p.last_sell_date is not None else None,
         "ret_sell": p.ret_since_sell,
+        "_buy_on": _on(p.last_buy_date),
+        "_sell_on": _on(p.last_sell_date),
         "_buy_age": _days(p.last_buy_date, asof) if held else -1,
         "_sell_age": _days(p.last_sell_date, asof) if sold_in_holding else -1,
         "_hold_age": (_days(p.held_since, asof)
                       if held and not sold_in_holding else -1),
         "_stale": int(mark_age > STALE_MARK_DAYS),
-        "_mark_date": _iso(p.mark_date),
+        "_mark_on": _on(p.mark_date),
     }
 
 
-def tooltips(rows: list[dict], asof: pd.Timestamp) -> list[dict]:
+def tooltips(rows: list[dict]) -> list[dict]:
     """Hover text for the last-trade cells, one dict per row, same order."""
     out = []
     for r in rows:
         t = {}
-        for col in ("last_buy", "last_sell"):
-            if r.get(col, "—") != "—":
-                t[col] = _ago(_days(pd.Timestamp(r[col]), asof))
+        if r.get("_buy_on"):
+            t["last_buy"] = f"Bought {r['_buy_on']}"
+        if r.get("_sell_on"):
+            t["last_sell"] = f"Sold {r['_sell_on']}"
         if r.get("_hold_age", -1) >= 0:
-            t["last_sell"] = (("Last sold before this holding opened. "
-                               if r.get("last_sell", "—") != "—"
-                               else "Never sold. ")
+            t["last_sell"] = ((f"Sold {r['_sell_on']}, before this holding opened. "
+                               if r.get("_sell_on") else "Never sold. ")
                               + f"Held {r['_hold_age']:,} days without selling")
         if r.get("_stale"):
-            note = f"Price from {r['_mark_date']}, so this may be out of date"
+            note = f"Price from {r['_mark_on']}, so this may be out of date"
             t["ret_buy"] = t["ret_sell"] = note
         out.append(t)
     return out
@@ -471,7 +476,7 @@ def _render_inner() -> html.Div:
                 sort_action="native",
                 page_action="none",
                 merge_duplicate_headers=True,
-                tooltip_data=tooltips(data["rows"], data["asof"]),
+                tooltip_data=tooltips(data["rows"]),
                 tooltip_delay=300,
                 tooltip_duration=None,
                 **TABLE_STYLE,
@@ -556,7 +561,7 @@ def filter_rows(term, n_clicks, _version):
                 if t in r["_full_name"].lower() or t in r["id"].lower()]
 
     label = "Hide closed" if show_closed else f"Show closed ({data['n_closed']})"
-    return rows, tooltips(rows, data["asof"]), label
+    return rows, tooltips(rows), label
 
 
 @callback(
