@@ -276,3 +276,51 @@ def test_no_two_adjacent_columns_share_a_bottom_header():
     from pages.pnl_analysis import TABLE_COLUMNS
     bottom = [c["name"][1] for c in TABLE_COLUMNS]
     assert all(a != b for a, b in zip(bottom, bottom[1:])), bottom
+
+
+# --------------------------------------------------------------------------
+# Risk while held, Status column removed
+# --------------------------------------------------------------------------
+
+def test_status_column_is_gone_but_status_still_drives_the_rows():
+    from pages.pnl_analysis import TABLE_COLUMNS, TABLE_STYLE
+    ids = [c["id"] for c in TABLE_COLUMNS]
+    assert "status" not in ids
+    assert ids[ids.index("roce_annualised") + 1:][:3] == ["vol", "max_dd", "sharpe"]
+    closed_name = [x for x in TABLE_STYLE["style_data_conditional"]
+                   if x["if"].get("filter_query") == "{status} = closed"
+                   and x["if"].get("column_id") == "name"]
+    assert closed_name and closed_name[0]["fontStyle"] == "italic"
+
+
+def test_unpriced_and_error_rows_are_tagged_in_the_name():
+    from pages.pnl_analysis import STATUS_TAG
+    assert STATUS_TAG["unpriced"].endswith("unpriced")
+    assert STATUS_TAG["error"].endswith("error")
+    assert "open" not in STATUS_TAG and "closed" not in STATUS_TAG
+
+
+def test_risk_cells_without_data_are_blank():
+    from pages.pnl_analysis import risk_cells
+    c = risk_cells(None)
+    assert (c["vol"], c["max_dd"], c["sharpe"]) == (None, None, None)
+
+
+def test_sharpe_hover_gives_sortino_and_days_and_warns_when_short():
+    from core.risk import Risk
+    from pages.pnl_analysis import risk_cells, tooltips
+    r = Risk(vol=0.25, max_dd=-0.1, sharpe=1.2, sortino=1.8, n_days=120)
+    row = {**risk_cells(r), "_short": 1}
+    tip = tooltips([row])[0]["sharpe"]
+    assert tip.startswith("Sortino 1.80") and "120 days held" in tip
+    assert "too few to rely on" in tip
+    long_row = {**risk_cells(r), "_short": 0}
+    assert "too few" not in tooltips([long_row])[0]["sharpe"]
+
+
+def test_sharpe_bands_skip_blanks_and_leave_0_to_half_uncoloured():
+    from pages.pnl_analysis import _sharpe_bands
+    rules = _sharpe_bands()
+    assert all(x["if"]["filter_query"].startswith("{sharpe} is num") for x in rules)
+    queries = " ".join(x["if"]["filter_query"] for x in rules)
+    assert "{sharpe} < 0.0" in queries and "{sharpe} >= 0.5" in queries

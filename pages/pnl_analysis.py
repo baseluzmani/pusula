@@ -25,6 +25,7 @@ from dash.dash_table.Format import Format, Group, Scheme, Symbol
 
 from core import finance as fin
 from core.repo import portfolio as repo
+from core import risk as risk_engine
 from core.roce import (
     MIN_DAYS_TO_ANNUALISE,
     Position,
@@ -41,7 +42,7 @@ PREFIX = "basket-"
 def get_data() -> dict:
     """Run the engine and return everything the page needs.
 
-    Returns {'trades', 'members', 'rows', 'by_id', 'asof', 'approx',
+    Returns {'trades', 'risk', 'members', 'rows', 'by_id', 'asof', 'approx',
     'unpriceable', 'n_closed', 'n_unpriced'}.
 
     Deliberately uncached. There was a module-level dict here, and it was the
@@ -67,10 +68,13 @@ def get_data() -> dict:
     members = compute_all()
     _, approx, unpriceable = load_latest_prices()
     asof = pd.Timestamp.today().normalize()
+    trades = load_trades()
+    risk = risk_engine.compute_risk(trades, asof)
     return dict(
-        trades=load_trades(),
+        trades=trades,
+        risk=risk,
         members=members,
-        rows=positions_to_rows(members, asof),
+        rows=positions_to_rows(members, asof, risk.by_id),
         by_id={p.instrument: p for p in members},
         asof=asof,
         approx=approx,
@@ -166,6 +170,29 @@ HOLD_GREEN_DAYS = 90
 STALE_MARK_DAYS = 7
 
 
+# Sharpe ratio fills: (lo, hi) half-open [lo, hi); None is open-ended.
+# 0 to 0.5 gets no colour - not distinguishable from cash at these lengths.
+SHARPE_BANDS = [
+    (None, 0.0, NEG_FILL[2]),
+    (0.5, 1.0, POS_FILL[1]),
+    (1.0, 2.0, POS_FILL[2]),
+    (2.0, None, POS_FILL[3]),
+]
+
+
+def _sharpe_bands(col: str = "sharpe") -> list[dict]:
+    out = []
+    for lo, hi, fill in SHARPE_BANDS:
+        q = [f"{{{col}}} is num"]
+        if lo is not None:
+            q.append(f"{{{col}}} >= {lo}")
+        if hi is not None:
+            q.append(f"{{{col}}} < {hi}")
+        out.append({"if": {"filter_query": " && ".join(q), "column_id": col},
+                    "backgroundColor": fill})
+    return out
+
+
 def _age_bands(age_col: str, show_col: str, bands) -> list[dict]:
     """Fill `show_col` by the day count in hidden `age_col`. -1 = no colour."""
     out = []
@@ -216,7 +243,6 @@ TABLE_STYLE = dict(
     style_cell_conditional=[
         {"if": {"column_id": "name"}, "textAlign": "left", "minWidth": "200px",
          "fontWeight": 500},
-        {"if": {"column_id": "status"}, "textAlign": "left", "width": "60px"},
         {"if": {"column_id": "net_cost"}, "color": "#9ca3af"},
         {"if": {"column_id": ["last_buy", "last_sell"]}, "textAlign": "center",
          "fontVariantNumeric": "tabular-nums", "minWidth": "52px"},
@@ -224,18 +250,22 @@ TABLE_STYLE = dict(
     style_data_conditional=(
         _rate_bands("roce_total")
         + _rate_bands("roce_annualised")
+        # Before the closed-row rule, like ROCE, so closed rows show it plain.
+        + _sharpe_bands()
         + _money_text("total_pnl")
         + _money_text("realised")
         + _money_text("unrealised")
         + _money_text("fx_pnl")
         + [
+            # Under MIN_DAYS_TO_ANNUALISE the rate - and the mean return in
+            # Sharpe - is too noisy to read, so both are greyed out.
             {"if": {"filter_query": "{_short} = 1",
-                    "column_id": "roce_annualised"},
+                    "column_id": ["roce_annualised", "sharpe"]},
              "color": "#c0c4cc", "fontStyle": "italic",
              "backgroundColor": "transparent"},
             {"if": {"filter_query": "{status} = closed"},
              "backgroundColor": "#fafafa"},
-            {"if": {"filter_query": "{status} = closed", "column_id": "status"},
+            {"if": {"filter_query": "{status} = closed", "column_id": "name"},
              "color": "#9ca3af", "fontStyle": "italic"},
         ]
         # After the closed-row rule, so closed rows keep their return colours:
@@ -260,6 +290,7 @@ TABLE_STYLE = dict(
 
 _INT = Format(precision=0, scheme=Scheme.fixed, group=Group.yes)
 _PCT = Format(precision=1, scheme=Scheme.percentage)
+_RATIO = Format(precision=2, scheme=Scheme.fixed)
 # Days since a trade, shown as "3d". Numeric, so the column sorts by age; a
 # blank (no such trade) shows as a dash.
 _AGO = Format(precision=0, scheme=Scheme.fixed, group=Group.yes,
@@ -269,7 +300,6 @@ _AGO = Format(precision=0, scheme=Scheme.fixed, group=Group.yes,
 # top names merge into one cell (merge_duplicate_headers on the table).
 TABLE_COLUMNS = [
     dict(id="name", name=["", "Instrument"], type="text"),
-    dict(id="status", name=["", "Status"], type="text"),
     dict(id="qty", name=["", "Qty"], type="numeric", format=_INT),
     dict(id="net_cost", name=["", "Net cost"], type="text"),
     dict(id="days_deployed", name=["Capital employed", "Days"], type="numeric",
@@ -288,6 +318,12 @@ TABLE_COLUMNS = [
     dict(id="roce_total", name=["ROCE", "To date"], type="numeric", format=_PCT),
     dict(id="roce_annualised", name=["ROCE", "Annualised"], type="numeric",
          format=_PCT),
+    # core.risk: daily GBP returns over the days the position was held.
+    dict(id="vol", name=["Risk while held", "Vol"], type="numeric", format=_PCT),
+    dict(id="max_dd", name=["Risk while held", "Max DD"], type="numeric",
+         format=_PCT),
+    dict(id="sharpe", name=["Risk while held", "Sharpe"], type="numeric",
+         format=_RATIO),
     # How long ago, as "3d"; the date itself is in the hover text.
     dict(id="last_buy", name=["Last buy", "Ago"], type="numeric", format=_AGO),
     dict(id="ret_buy", name=["Last buy", "Return"], type="numeric",
@@ -376,17 +412,45 @@ def tooltips(rows: list[dict]) -> list[dict]:
         if r.get("_stale"):
             note = f"Price from {r['_mark_on']}, so this may be out of date"
             t["ret_buy"] = t["ret_sell"] = note
+        if r.get("sharpe") is not None:
+            parts = []
+            if r.get("_sortino") is not None:
+                parts.append(f"Sortino {r['_sortino']:.2f}")
+            parts.append(f"{r.get('_risk_days', 0):,} days held")
+            if r.get("_short"):
+                parts.append(f"under {MIN_DAYS_TO_ANNUALISE} days, too few to rely on")
+            t["sharpe"] = " \u00b7 ".join(parts)
+        if r.get("_risk_missing"):
+            note = f"{r['_risk_missing']:,} held days had no price and are left out"
+            t["vol"] = t["max_dd"] = note
         out.append(t)
     return out
 
 
-def positions_to_rows(members: list[Position], asof: pd.Timestamp) -> list[dict]:
+# Shown after the name now that there is no Status column. Open and closed
+# need no tag: closed rows are greyed out and italic.
+STATUS_TAG = {"unpriced": " \u00b7 unpriced", "error": " \u00b7 error"}
+
+
+def risk_cells(r) -> dict:
+    """Vol / Max DD / Sharpe for one row, plus hidden hover fields."""
+    if r is None:
+        return {"vol": None, "max_dd": None, "sharpe": None,
+                "_sortino": None, "_risk_days": 0, "_risk_missing": 0}
+    return {"vol": r.vol, "max_dd": r.max_dd, "sharpe": r.sharpe,
+            "_sortino": r.sortino, "_risk_days": r.n_days,
+            "_risk_missing": r.missing_days}
+
+
+def positions_to_rows(members: list[Position], asof: pd.Timestamp,
+                      risk_by_id: dict | None = None) -> list[dict]:
     instruments = repo.instruments()
+    risk_by_id = risk_by_id or {}
     rows = []
     for p in members:
         rows.append({
             "id": p.instrument,
-            "name": short_name(p.name),
+            "name": short_name(p.name) + STATUS_TAG.get(p.status, ""),
             "_full_name": p.name,
             "status": p.status,
             "qty": p.qty,
@@ -406,6 +470,7 @@ def positions_to_rows(members: list[Position], asof: pd.Timestamp) -> list[dict]
             # matches a boolean, so short holdings were never greyed out.
             "_short": int(p.days_deployed < MIN_DAYS_TO_ANNUALISE),
             **trade_cells(p, asof),
+            **risk_cells(risk_by_id.get(p.instrument)),
         })
     return rows
 
@@ -637,6 +702,24 @@ def update_basket(selected, _version):
                "" if can_annualise else f"under {MIN_DAYS_TO_ANNUALISE} days"),
     ]
 
+    # Risk of the basket as held: each day's summed GBP P&L over summed
+    # opening value, so sizes and correlations count. Usually better than
+    # the members' average Sharpe - that gap is the diversification.
+    risk = data["risk"]
+    rb = risk_engine.basket(
+        [risk.by_id[p.instrument].daily for p in b.members if p.instrument in risk.by_id],
+        risk.rf)
+    sortino = f"Sortino {rb['sortino']:.2f}" if rb["sortino"] is not None else ""
+    cards += [
+        metric("Vol", f"{rb['vol']:.1%}" if rb["vol"] is not None else "—",
+               "while held"),
+        metric("Max DD", f"{rb['max_dd']:.1%}" if rb["max_dd"] is not None else "—",
+               "worst peak to trough"),
+        metric("Sharpe", f"{rb['sharpe']:.2f}" if rb["sharpe"] is not None else "—",
+               sortino if can_annualise
+               else f"under {MIN_DAYS_TO_ANNUALISE} days, too few to rely on"),
+    ]
+
     contrib = sorted(chosen, key=lambda p: p.capital_days, reverse=True)
     note = "Contribution to annualised rate:  " + "   ·   ".join(
         f"{p.name}: {p.capital_days / b.capital_days:.0%} of capital-days, "
@@ -666,6 +749,20 @@ def update_basket(selected, _version):
     )
 
     checks = validate(chosen, b, data["trades"])
+    gaps = [(p.instrument, risk.by_id[p.instrument].missing_days) for p in chosen
+            if p.instrument in risk.by_id and risk.by_id[p.instrument].missing_days]
+    checks.append((
+        "Every held day has a price (risk columns)",
+        not gaps,
+        "all priced" if not gaps else
+        f"{len(gaps)} with gaps, those days left out: "
+        + ", ".join(f"{i} ({n} days)" for i, n in gaps[:5]),
+    ))
+    checks.append((
+        "Risk-free rate for Sharpe",
+        risk.rf_source != "zero (no data)",
+        risk.rf_source,
+    ))
     val = html.Ul([
         html.Li([
             html.Span("pass " if ok else "FAIL ",
