@@ -21,6 +21,7 @@ should display. Keeping that logic here means the three tabs never each
 re-implement "what does 'my holdings' mean".
 """
 
+import pandas as pd
 from dash import html, dcc, callback, Input, Output, State, ctx, no_update
 
 from core import theme
@@ -142,7 +143,6 @@ def selector_bar():
 
 def _date(value) -> str:
     try:
-        import pandas as pd
         return pd.Timestamp(value).strftime("%d %b %Y")
     except (ValueError, TypeError):
         return str(value)
@@ -304,3 +304,132 @@ def _write_store(mode, picked, types, etf, options):
         store = {"mode": "holdings", "picked": []}
         count = f"{len(ids)} holdings"
     return store, count
+
+
+# --- ETF universe: the fund on top, its holdings below ---------------------
+#
+# Every Markets tab draws the "ETF" universe the same way: the fund's own row
+# first (shaded), then its holdings with their weight in the fund, then -
+# greyed - the holdings the tab has no row for (no Yahoo symbol, not in
+# instruments, no prices, or too little history for that tab). Weights are
+# shown, never used in a calculation.
+
+FUND_ROW_BG = "#F4F6F9"
+WEIGHT = "weight"
+
+
+def etf_layout(store, df: pd.DataFrame, id_col: str = "fund_id",
+               no_row: str = "no data") -> dict | None:
+    """
+    None outside the ETF universe. Otherwise:
+
+        fund   the rows of ``df`` for the fund itself
+        held   the other rows of ``df``
+               Both get "weight" (percent of the fund; NaN on the fund row)
+               and "is_fund".
+        gaps   holdings ``df`` has no row for: name, weight, status - by
+               weight. A priced holding missing from ``df`` gets ``no_row``
+               as its status (e.g. "short history" on Momentum).
+        info   est_repo.members info: label, holdings_date, counts
+
+    The tab sorts ``held`` itself, then draws fund, held, gaps.
+    """
+    key = etf_target(store)
+    if not key:
+        return None
+    members, info = est_repo.members(key)
+    df = df.copy() if df is not None else pd.DataFrame(columns=[id_col])
+    if members.empty:
+        return {"fund": df.iloc[0:0],
+                "held": df.assign(**{WEIGHT: None, "is_fund": False}),
+                "gaps": pd.DataFrame(columns=["name", WEIGHT, "status"]),
+                "info": info}
+
+    hold = members[~members["is_fund"]]
+    weights = dict(zip(hold["fund_id"].dropna(),
+                       hold.loc[hold["fund_id"].notna(), "weight_pct"]))
+    fund_ids = set(members.loc[members["is_fund"], "fund_id"].dropna())
+    df[WEIGHT] = df[id_col].map(weights) if not df.empty else []
+    is_fund = df[id_col].isin(fund_ids) if not df.empty else []
+
+    have = set(df[id_col]) if not df.empty else set()
+    gaps = hold[~hold["fund_id"].isin(have) | hold["fund_id"].isna()].copy()
+    gaps["status"] = [no_row if s == est_repo.STATUS_OK else s
+                      for s in gaps["status"]]
+    gaps = (gaps.rename(columns={"weight_pct": WEIGHT})
+                .sort_values(WEIGHT, ascending=False)
+                [["name", WEIGHT, "status"]])
+    fund = df[is_fund].assign(is_fund=True) if not df.empty else df
+    held = df[~is_fund].assign(is_fund=False) if not df.empty else df
+    return {"fund": fund, "held": held,
+            "gaps": gaps.reset_index(drop=True), "info": info}
+
+
+def etf_sort(sort: dict, store, default: dict) -> dict:
+    """The tab's sort state. Entering the ETF universe (or picking another
+    fund) sorts the holdings by weight; leaving it goes back to ``default``.
+    Sorting by a column header in between is kept."""
+    key = etf_target(store)
+    sort = dict(sort or default)
+    if key and sort.get("etf") != key:
+        return {"col": WEIGHT, "asc": False, "etf": key}
+    if not key and (sort.get("etf") or sort.get("col") == WEIGHT):
+        return dict(default)
+    return sort
+
+
+def etf_caption(info: dict, extra: str = ""):
+    """Fund name and coverage line above an ETF-universe table."""
+    if not info:
+        return None
+    note = (f"{info['holdings']} holdings on file, "
+            f"{info['listed']:.1f}% of the fund · {info['priced']} "
+            f"priced, {info['priced_weight']:.1f}%")
+    if info.get("holdings_date"):
+        note += " · holdings as of " + _date(info["holdings_date"])
+    if extra:
+        note += f" · {extra}"
+    return html.Div([
+        html.Div(str(info["label"]).upper(), style={
+            "fontSize": "9px", "fontWeight": 700, "letterSpacing": "0.06em",
+            "color": theme.SLATE, "padding": "8px 0 1px"}),
+        html.Div(note, style={"fontSize": "10px", "color": theme.NEUTRAL,
+                              "borderBottom": f"1px solid {theme.LINE}",
+                              "paddingBottom": "3px", "marginBottom": "4px"}),
+    ])
+
+
+def weight_text(value, is_fund: bool = False) -> str:
+    if value is not None and pd.notna(value):
+        return f"{value:.2f}%"
+    return "Fund" if is_fund else "—"
+
+
+def etf_gap_rows(gaps: pd.DataFrame, n_after: int, cell: dict,
+                 with_type: bool = True, name_width: str = "220px") -> list:
+    """Greyed rows for holdings a tab cannot show: name, status (in the Type
+    column, or in the name's tooltip when there is none), weight, then
+    ``n_after`` empty cells."""
+    grey = {**cell, "color": theme.NEUTRAL}
+    rows = []
+    for g in gaps.to_dict("records"):
+        name = str(g["name"])
+        cells = [html.Td(html.Span(_cut(name), title=f"{name} - {g['status']}"),
+                         style={**grey, "whiteSpace": "nowrap",
+                                "maxWidth": name_width, "overflow": "hidden",
+                                "textOverflow": "ellipsis"})]
+        if with_type:
+            cells.append(html.Td(g["status"], style={**grey,
+                                 "fontSize": "9px", "whiteSpace": "nowrap"}))
+        cells.append(html.Td(weight_text(g[WEIGHT]),
+                             style={**grey, **theme.NUM,
+                                    "textAlign": "right"}))
+        cells += [html.Td("—", style={**grey, "textAlign": "right"})
+                  for _ in range(n_after)]
+        rows.append(html.Tr(cells, style={
+            "borderBottom": f"1px solid {theme.LINE}"}))
+    return rows
+
+
+def _cut(name, n=30):
+    return name if len(name) <= n else name[:n - 1] + "…"

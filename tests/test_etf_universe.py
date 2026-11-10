@@ -205,3 +205,39 @@ def test_background_status(tmp_path, monkeypatch):
     log.write_text("x\n== finished failed\n\n")
     assert not background.status(str(log))["ok"]
     assert background.status(str(tmp_path / "gone.log"))["finished"]
+
+
+def test_etf_layout_splits_fund_holdings_and_gaps(fund_db):
+    store = {"mode": "etf", "etf": "COMPOSITE:HSBC_EM"}
+    df = pd.DataFrame({"fund_id": ["YF:NVDA", "COMPOSITE:HSBC_EM"],
+                       "x": [1.0, 2.0]})
+    lay = universe.etf_layout(store, df, no_row="short history")
+    assert list(lay["fund"]["fund_id"]) == ["COMPOSITE:HSBC_EM"]
+    assert bool(lay["fund"]["is_fund"].iloc[0])
+    assert list(lay["held"]["fund_id"]) == ["YF:NVDA"]
+    assert lay["held"]["weight"].iloc[0] == pytest.approx(8.5)
+    gaps = dict(zip(lay["gaps"]["name"], lay["gaps"]["status"]))
+    # Toyota has an instruments row but no prices; Samsung none; Mystery no
+    # symbol - all listed, by weight.
+    assert list(lay["gaps"]["name"]) == ["Toyota Motor Corp", "Samsung Fire",
+                                         "Mystery Co"]
+    assert gaps["Mystery Co"] == est_repo.STATUS_UNMAPPED
+    # A priced holding the tab has no row for gets the tab's own reason.
+    lay = universe.etf_layout(store, df[df["fund_id"] != "YF:NVDA"],
+                              no_row="short history")
+    assert dict(zip(lay["gaps"]["name"], lay["gaps"]["status"]))[
+        "NVIDIA Corp"] == "short history"
+    assert universe.etf_layout({"mode": "all"}, df) is None
+
+
+def test_etf_sort():
+    default = {"col": "YTD", "asc": False}
+    etf = {"mode": "etf", "etf": "A"}
+    s = universe.etf_sort(default, etf, default)
+    assert s == {"col": "weight", "asc": False, "etf": "A"}
+    clicked = {**s, "col": "1D", "asc": True}            # header click kept
+    assert universe.etf_sort(clicked, etf, default) == clicked
+    other = universe.etf_sort(clicked, {"mode": "etf", "etf": "B"}, default)
+    assert other["col"] == "weight" and other["etf"] == "B"
+    assert universe.etf_sort(clicked, {"mode": "holdings"}, default) == default
+    assert universe.etf_sort(default, {"mode": "holdings"}, default) == default

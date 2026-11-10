@@ -15,7 +15,10 @@ column; funds not yet priced today show their last move, dated on the tile).
 Group by type nests the tiles under their asset type. The sums are in
 core/daymove.py.
 
-In the "ETF" universe the map shows the fund's holdings instead, each tile
+In the "ETF" universe the grid is one table - the fund on top, then its
+holdings with their weight in the fund, sorted by the chosen period, then
+the holdings with no prices, greyed - and "Group by type" is hidden (every
+holding has the same type). The map shows the fund's holdings instead, each tile
 sized by its weight in the fund and coloured by its own latest daily move in
 its own currency. No total is shown: the weights are for sizing only.
 Holdings with no price are left off the map (the note says how many).
@@ -66,12 +69,13 @@ def render():
                                           for c in HEAT_COLS]),
                 ], style={"display": "flex", "alignItems": "center",
                           "marginRight": "18px"}),
-                dcc.Checklist(id="hm-group",
-                              options=[{"label": " Group by type", "value": "on"}],
-                              value=["on"],
-                              inputStyle={"marginRight": "6px"},
-                              labelStyle={"fontSize": "12px",
-                                          "color": theme.TEXT}),
+                html.Div(dcc.Checklist(
+                    id="hm-group",
+                    options=[{"label": " Group by type", "value": "on"}],
+                    value=["on"],
+                    inputStyle={"marginRight": "6px"},
+                    labelStyle={"fontSize": "12px", "color": theme.TEXT}),
+                    id="hm-group-wrap"),
                 html.Div([
                     html.Label("Since", style={"fontSize": "11px",
                                "color": theme.SLATE, "margin": "0 6px 0 18px"}),
@@ -92,6 +96,13 @@ def render():
     ])
 
 
+# Group by type means nothing for one fund's holdings: hidden in the ETF
+# universe (and ignored there by _grid and _tree).
+@callback(Output("hm-group-wrap", "style"), Input(universe.STORE_ID, "data"))
+def _group_toggle(store):
+    return {"display": "none"} if universe.etf_target(store) else {}
+
+
 @callback(
     Output("hm-grid", "children"),
     Input(universe.STORE_ID, "data"),
@@ -110,10 +121,32 @@ def _grid(store, sort_col, group, since):
         return _empty("No instruments in this universe.")
 
     table = repo.period_returns(fund_ids=ids, since_date=since)
+    since_label = pd.Timestamp(since).strftime("%d %b %y")
+
+    lay = universe.etf_layout(store, table if not table.empty else None,
+                              no_row="no prices")
+    if lay is not None:
+        held = lay["held"]
+        if not held.empty:
+            held = held.sort_values(sort_col, ascending=False,
+                                    na_position="last")
+        rows = ([_row(r, sort_col, weights=True)
+                 for r in lay["fund"].to_dict("records")]
+                + [_row(r, sort_col, weights=True)
+                   for r in held.to_dict("records")]
+                + universe.etf_gap_rows(
+                    lay["gaps"], len(HEAT_COLS),
+                    {"padding": "4px 8px", "fontSize": "11px"},
+                    with_type=False, name_width="230px"))
+        return html.Div([
+            universe.etf_caption(lay["info"], "own-currency returns"),
+            html.Table([_header_row(since_label, sort_col, weights=True),
+                        html.Tbody(rows)],
+                       style={"width": "100%", "borderCollapse": "collapse"}),
+        ])
+
     if table.empty:
         return _empty("No returns to show.")
-
-    since_label = pd.Timestamp(since).strftime("%d %b %y")
     header = _header_row(since_label, sort_col)
 
     if grouped:
@@ -382,8 +415,10 @@ def _signed_money(v):
     return f"{'+' if v >= 0 else '-'}\u00a3{abs(v):,.0f}"
 
 
-def _header_row(since_label, sort_col):
+def _header_row(since_label, sort_col, weights=False):
     cells = [html.Th("Instrument", style=_th("left"))]
+    if weights:
+        cells.append(html.Th("Weight", style=_th("right")))
     for c in HEAT_COLS:
         label = since_label if c == "Since" else c
         active = c == sort_col
@@ -401,14 +436,23 @@ def _th(align):
             "zIndex": 1}
 
 
-def _row(r, sort_col):
+def _row(r, sort_col, weights=False):
+    is_fund = bool(r.get("is_fund"))
+    bg = universe.FUND_ROW_BG if is_fund else "white"
     cells = [html.Td(html.Span(_short(r["Fund"]), title=str(r["Fund"])),
                      style={"padding": "4px 8px", "fontSize": "11px",
-                            "fontWeight": 500, "color": theme.INK,
+                            "fontWeight": 700 if is_fund else 500,
+                            "color": theme.INK,
                             "whiteSpace": "nowrap", "maxWidth": "230px",
                             "overflow": "hidden", "textOverflow": "ellipsis",
                             "position": "sticky", "left": 0,
-                            "background": "white"})]
+                            "background": bg})]
+    if weights:
+        cells.append(html.Td(
+            universe.weight_text(r.get(universe.WEIGHT), is_fund),
+            style={"padding": "4px 8px", "fontSize": "11px",
+                   "textAlign": "right", **theme.NUM, "background": bg,
+                   "color": theme.NEUTRAL if is_fund else theme.TEXT}))
     for c in HEAT_COLS:
         val = r.get(c)
         has = pd.notna(val)
@@ -422,7 +466,8 @@ def _row(r, sort_col):
                    "outline": (f"2px solid {theme.NEEDLE}" if emphasise and has
                                else "none"),
                    "outlineOffset": "-2px"}))
-    return html.Tr(cells, style={"borderBottom": f"1px solid {theme.LINE}"})
+    return html.Tr(cells, style={"borderBottom": (
+        f"2px solid {theme.LINE}" if is_fund else f"1px solid {theme.LINE}")})
 
 
 def _short(name, n=32):

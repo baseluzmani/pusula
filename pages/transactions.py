@@ -28,7 +28,6 @@ import plotly.graph_objects as go
 
 from core import theme, config
 from core.repo import market as repo
-from core.repo import fundest as est_repo
 from core.repo import settings
 from ui import universe
 
@@ -115,20 +114,15 @@ def _table(store, since, _sorts, selected, sort):
     etf = universe.etf_target(store)
     if isinstance(trig, dict) and trig.get("type") == "tx-sort":
         col = trig["col"]
-        sort = ({"col": col, "asc": not sort["asc"]}
-                if sort["col"] == col else {"col": col, "asc": False})
-    elif trig in (universe.STORE_ID, None):
-        # A fund's holdings open sorted by weight; Weight means nothing
-        # outside the ETF universe.
-        if etf:
-            sort = {"col": "Weight", "asc": False}
-        elif sort["col"] == "Weight":
-            sort = {"col": "YTD", "asc": False}
+        sort = ({**sort, "col": col, "asc": not sort["asc"]}
+                if sort["col"] == col else {**sort, "col": col, "asc": False})
+    # A fund's holdings open sorted by weight (universe.etf_sort).
+    sort = universe.etf_sort(sort, store, {"col": "YTD", "asc": False})
 
     if not universe.is_chosen(store):
         return _empty(universe.PROMPT), sort
     if etf:
-        return _etf_table(etf, since, sort, selected), sort
+        return _etf_table(store, since, sort, selected), sort
     ids = universe.resolve_ids(store)
     if not ids:
         return _empty("No instruments in this universe."), sort
@@ -158,65 +152,31 @@ def _table(store, since, _sorts, selected, sort):
     return html.Div(sections), sort
 
 
-def _etf_table(key, since, sort, selected):
-    """The ETF universe: fund row, priced holdings, then the gaps."""
-    members, info = est_repo.members(key)
-    if members.empty:
-        return _empty("This fund has no price series or holdings on file.")
-
-    ids = [f for f in members["fund_id"].dropna()
-           if f in set(est_repo.member_ids(key))]
+def _etf_table(store, since, sort, selected):
+    """The ETF universe: the fund's row, its priced holdings, then the
+    holdings with no prices, greyed (ui/universe.py draws all tabs so)."""
+    ids = universe.resolve_ids(store)
     px = repo.prices(ids) if ids else pd.DataFrame()
     table = (repo.period_returns(price_df=px, since_date=since)
-             if not px.empty else pd.DataFrame())
-    returns = table.set_index("fund_id") if not table.empty else None
-
-    rows = []
-    for m in members.to_dict("records"):
-        fid = m["fund_id"]
-        r = {"fund_id": fid, "Fund": m["name"], "Type": m["status"],
-             "Price": None, "Weight": m["weight_pct"],
-             "is_fund": bool(m["is_fund"]), "priced": False}
-        for c in RETURN_COLS:
-            r[c] = None
-        if returns is not None and fid in returns.index:
-            got = returns.loc[fid]
-            r.update({"Fund": got["Fund"], "Type": got["Type"],
-                      "Price": got["Price"], "priced": True})
-            for c in RETURN_COLS:
-                r[c] = got[c]
-        rows.append(r)
-    df = pd.DataFrame(rows)
-
-    fund = df[df["is_fund"]]
-    held = df[~df["is_fund"] & df["priced"]]
-    gaps = df[~df["is_fund"] & ~df["priced"]].sort_values(
-        "Weight", ascending=False, na_position="last")
+             if not px.empty else pd.DataFrame(columns=["fund_id"]))
+    lay = universe.etf_layout(store, table, no_row="no prices")
+    if not lay["info"]:
+        return _empty("This fund has no price series or holdings on file.")
+    held = lay["held"]
     if sort["col"] in held.columns and not held.empty:
         held = held.sort_values(sort["col"], ascending=sort["asc"],
                                 na_position="last")
-    df = pd.concat([fund, held, gaps], ignore_index=True)
-
     since_label = pd.Timestamp(since).strftime("%d %b %y")
-    note = (f"{info['holdings']} holdings on file, "
-            f"{info['listed']:.1f}% of the fund \u00b7 {info['priced']} "
-            f"priced, {info['priced_weight']:.1f}%")
-    if info.get("holdings_date"):
-        note += (" \u00b7 holdings as of "
-                 + pd.Timestamp(info["holdings_date"]).strftime("%d %b %Y"))
-    note += " \u00b7 returns in each instrument's own currency"
     return html.Div([
-        html.Div(str(info["label"]).upper(), style={
-            "fontSize": "9px", "fontWeight": 700, "letterSpacing": "0.06em",
-            "color": theme.SLATE, "padding": "8px 0 1px"}),
-        html.Div(note, style={"fontSize": "10px", "color": theme.NEUTRAL,
-                              "borderBottom": f"1px solid {theme.LINE}",
-                              "paddingBottom": "3px"}),
-        _group_table(df, since_label, sort, selected, weights=True),
+        universe.etf_caption(lay["info"],
+                             "returns in each instrument's own currency"),
+        _group_table(pd.concat([lay["fund"], held], ignore_index=True),
+                     since_label, sort, selected, gaps=lay["gaps"]),
     ])
 
 
-def _group_table(df, since_label, sort, selected, weights=False):
+def _group_table(df, since_label, sort, selected, gaps=None):
+    weights = gaps is not None
     def arrow(col):
         if sort["col"] == col:
             return " \u25B2" if sort["asc"] else " \u25BC"
@@ -224,7 +184,7 @@ def _group_table(df, since_label, sort, selected, weights=False):
 
     cols = [("Fund", "Fund", "left"), ("Type", "Type", "center")]
     if weights:
-        cols += [("Weight", "Weight", "right")]
+        cols += [("Weight", universe.WEIGHT, "right")]
     cols += [("Price", "Price", "right")]
     cols += [(f"{c}%" if c not in ("YTD",) else "YTD",
               c, "right") for c in RETURN_COLS[:-1]]
@@ -248,10 +208,7 @@ def _group_table(df, since_label, sort, selected, weights=False):
         fid = r["fund_id"]
         picked = fid is not None and fid == selected
         is_fund = bool(r.get("is_fund"))
-        # ETF universe: a holding with no returns is listed, greyed, and
-        # cannot be clicked (there is nothing to chart).
-        grey = weights and not is_fund and not r.get("priced", True)
-        ink = theme.NEUTRAL if grey else theme.INK
+        ink = theme.INK
         price = r.get("Price")
         cells = [
             html.Td(html.Span(_short(r["Fund"]), title=str(r["Fund"])),
@@ -262,22 +219,19 @@ def _group_table(df, since_label, sort, selected, weights=False):
                            "maxWidth": "190px", "overflow": "hidden",
                            "textOverflow": "ellipsis"}),
             html.Td(r["Type"], style={"padding": "3px 5px", "fontSize": "9px",
-                    "textAlign": "center", "color": theme.NEUTRAL if grey
-                    else theme.SLATE, "whiteSpace": "nowrap"}),
+                    "textAlign": "center", "color": theme.SLATE, "whiteSpace": "nowrap"}),
         ]
         if weights:
-            w = r.get("Weight")
             cells.append(html.Td(
-                f"{w:.2f}%" if pd.notna(w) else ("Fund" if is_fund
-                                                 else "\u2014"),
+                universe.weight_text(r.get(universe.WEIGHT), is_fund),
                 className="num", style={"padding": "3px 7px",
                 "fontSize": "11px", "textAlign": "right", **theme.NUM,
-                "color": theme.NEUTRAL if grey or is_fund else theme.TEXT}))
+                "color": theme.NEUTRAL if is_fund else theme.TEXT}))
         cells.append(
             html.Td(f"{price:.1f}" if pd.notna(price) else "\u2014",
                     className="num", style={"padding": "3px 7px",
                     "fontSize": "11px", "textAlign": "right", **theme.NUM,
-                    "color": theme.NEUTRAL if grey else theme.TEXT}))
+                    "color": theme.TEXT}))
         for col in RETURN_COLS:
             val = r[col]
             has = pd.notna(val)
@@ -289,14 +243,15 @@ def _group_table(df, since_label, sort, selected, weights=False):
                        "color": ink}))
         style = {"borderBottom": f"1px solid {theme.LINE}",
                  "background": "#EEF4FB" if picked else
-                 ("#F4F6F9" if is_fund else "transparent")}
+                 (universe.FUND_ROW_BG if is_fund else "transparent")}
         if is_fund:
             style["borderBottom"] = f"2px solid {theme.LINE}"
-        if grey or fid is None:
-            body.append(html.Tr(cells, style=style))
-            continue
         body.append(html.Tr(cells, id={"type": "tx-row", "fund_id": fid},
                             n_clicks=0, style={**style, "cursor": "pointer"}))
+    if weights:
+        body += universe.etf_gap_rows(
+            gaps, 1 + len(RETURN_COLS),
+            {"padding": "3px 7px", "fontSize": "11px"})
 
     return html.Table([head, html.Tbody(body)],
                       style={"width": "100%", "borderCollapse": "collapse"})

@@ -19,6 +19,10 @@ Click a row to see its one-year chart (52-week high, 200-day average, your
 levels, your trades, and a note on the phases) and to set or change its
 levels. Levels are stored in the mkt_targets table (core/repo/targets.py),
 in the instrument's quote units - pence for a .L listing.
+
+In the "ETF" universe the table shows the fund first, then its holdings with
+their weight in the fund (sorted by weight to start with), then - greyed -
+the holdings with no prices or too little history.
 """
 
 from dash import html, dcc, callback, Input, Output, State, ctx, ALL, no_update
@@ -231,8 +235,26 @@ def _compute(store, _refresh):
         f"52-week high, {rules.ma_days}-day average",
         "prices in quote units",
     ])
-    return {"rows": rows, "ma_days": rules.ma_days,
-            "ma_fast_days": rules.ma_fast_days}, info
+    data = {"rows": rows, "ma_days": rules.ma_days,
+            "ma_fast_days": rules.ma_fast_days}
+    lay = universe.etf_layout(
+        store, pd.DataFrame({"fund_id": [r["fund_id"] for r in rows]}),
+        no_row="short history")
+    if lay is not None:
+        both = pd.concat([lay["fund"], lay["held"]])
+        weight = dict(zip(both["fund_id"], both[universe.WEIGHT]))
+        funds = set(lay["fund"]["fund_id"])
+        for r in rows:
+            w = weight.get(r["fund_id"])
+            r[universe.WEIGHT] = float(w) if w is not None and pd.notna(w) \
+                else None
+            r["is_fund"] = r["fund_id"] in funds
+        gaps = lay["gaps"]
+        data.update(etf=universe.etf_target(store), info=lay["info"],
+                    gaps=[{"name": g["name"], universe.WEIGHT:
+                           float(g[universe.WEIGHT]), "status": g["status"]}
+                          for g in gaps.to_dict("records")])
+    return data, info
 
 
 def _unit(info) -> str:
@@ -288,21 +310,34 @@ def _table(data, _clicks, sort):
     trig = ctx.triggered_id
     if isinstance(trig, dict) and trig.get("type") == "mon-sort":
         col = trig["col"]
-        sort = ({"col": col, "asc": not sort["asc"]}
-                if sort["col"] == col else {"col": col, "asc": True})
+        sort = ({**sort, "col": col, "asc": not sort["asc"]}
+                if sort["col"] == col else {**sort, "col": col, "asc": True})
+    etf = (data or {}).get("etf")
+    sort = universe.etf_sort(sort, {"mode": "etf" if etf else None,
+                                    "etf": etf},
+                             {"col": "status", "asc": True})
     if not data or not data.get("rows"):
         return "", sort
 
     df = pd.DataFrame(data["rows"])
+    fund = df.iloc[0:0]
+    if etf:
+        mask = df["is_fund"].fillna(False).astype(bool)
+        fund, df = df[mask], df[~mask]
     if sort["col"] == "status":
         df = df.sort_values(["status_rank", "dd_sigma"],
                             ascending=[sort["asc"], True], na_position="last")
     elif sort["col"] in df.columns:
         df = df.sort_values(sort["col"], ascending=sort["asc"],
                             na_position="last")
+    if etf:
+        df = pd.concat([fund, df], ignore_index=True)
 
     ma_days = data.get("ma_days", 200)
     fast_days = data.get("ma_fast_days", 50)
+    cols = COLS if not etf else (
+        COLS[:2] + [(universe.WEIGHT, "Weight", "right", universe.WEIGHT)]
+        + COLS[2:])
 
     def header(label):
         # Labels follow the configured lengths, e.g. "vs 50d", "50/200".
@@ -323,7 +358,7 @@ def _table(data, _clicks, sort):
                        "whiteSpace": "nowrap", "cursor": "pointer",
                        "userSelect": "none", "position": "sticky", "top": 0,
                        "zIndex": 1})
-        for key, label, align, skey in COLS]))
+        for key, label, align, skey in cols]))
 
     cell = {"padding": "4px 8px", "fontSize": "11px", "whiteSpace": "nowrap",
             "borderBottom": f"1px solid {theme.LINE}", "color": theme.INK}
@@ -337,12 +372,21 @@ def _table(data, _clicks, sort):
                          style={**STATUS_STYLE[r["status"]],
                                 "padding": "1px 7px", "borderRadius": "9px",
                                 "fontSize": "10px"})
-        body.append(html.Tr([
+        is_fund = bool(r.get("is_fund"))
+        lead = [
             html.Td(html.Div(html.Span(name, title=str(r["name"]))),
-                    style={**cell, "fontWeight": 600 if r["held"] else 400,
+                    style={**cell, "fontWeight": 700 if is_fund else
+                           (600 if r["held"] else 400),
                            "maxWidth": "220px", "overflow": "hidden",
                            "textOverflow": "ellipsis"}),
             html.Td(r["type"], style={**cell, "color": theme.SLATE}),
+        ]
+        if etf:
+            lead.append(html.Td(
+                universe.weight_text(r.get(universe.WEIGHT), is_fund),
+                style={**num, "color": theme.NEUTRAL if is_fund
+                       else theme.INK}))
+        body.append(html.Tr(lead + [
             html.Td(_price(r["price"], r["unit"]), style=num),
             html.Td(f"{r['dd']:+.1f}%", style={**num, "fontWeight": 600,
                     "background": theme.heat_rgb(r["dd"], cap=25)}),
@@ -368,7 +412,13 @@ def _table(data, _clicks, sort):
                     title=r["note"] or "",
                     style={**cell, "color": theme.SLATE}),
         ], id={"type": "mon-row", "fund_id": r["fund_id"]}, n_clicks=0,
-            style={"cursor": "pointer"}))
+            style={"cursor": "pointer",
+                   "background": universe.FUND_ROW_BG if is_fund else None}))
+    if etf:
+        body += universe.etf_gap_rows(
+            pd.DataFrame(data.get("gaps") or [],
+                         columns=["name", universe.WEIGHT, "status"]),
+            len(cols) - 3, cell)
 
     note = html.Div("Bold = held \u00b7 \u25e6 = under a year of history \u00b7 "
                     "levels show the move needed to reach them; shaded when "
@@ -379,9 +429,10 @@ def _table(data, _clicks, sort):
                     "the detail",
                     style={"fontSize": "10px", "color": theme.NEUTRAL,
                            "marginTop": "8px"})
-    return html.Div([html.Table([head, html.Tbody(body)],
-                                style={"width": "100%",
-                                       "borderCollapse": "collapse"}),
+    caption = universe.etf_caption(data.get("info")) if etf else None
+    return html.Div([caption, html.Table([head, html.Tbody(body)],
+                                         style={"width": "100%",
+                                                "borderCollapse": "collapse"}),
                      note]), sort
 
 

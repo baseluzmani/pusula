@@ -94,8 +94,9 @@ def _table(store, since, _sorts, selected, sort):
     trig = ctx.triggered_id
     if isinstance(trig, dict) and trig.get("type") == "cmp-sort":
         col = trig["col"]
-        sort = ({"col": col, "asc": not sort["asc"]}
-                if sort["col"] == col else {"col": col, "asc": False})
+        sort = ({**sort, "col": col, "asc": not sort["asc"]}
+                if sort["col"] == col else {**sort, "col": col, "asc": False})
+    sort = universe.etf_sort(sort, store, {"col": "YTD", "asc": False})
 
     if not universe.is_chosen(store):
         return _empty(universe.PROMPT), sort
@@ -104,14 +105,30 @@ def _table(store, since, _sorts, selected, sort):
         return _empty("No instruments in this universe."), sort
 
     table = repo.period_returns(fund_ids=ids, since_date=since)
+    selected = selected or []
+    since_label = pd.Timestamp(since).strftime("%d %b %y")
+
+    # ETF universe: one block, the fund on top, holdings below.
+    lay = universe.etf_layout(store, table if not table.empty else None,
+                              no_row="no prices")
+    if lay is not None:
+        held = lay["held"]
+        if sort["col"] in held.columns and not held.empty:
+            held = held.sort_values(sort["col"], ascending=sort["asc"],
+                                    na_position="last")
+        return html.Div([
+            universe.etf_caption(lay["info"],
+                                 "returns in each instrument's own currency"),
+            _group_table(pd.concat([lay["fund"], held], ignore_index=True),
+                         since_label, sort, selected, gaps=lay["gaps"]),
+        ]), sort
+
     if table.empty:
         return _empty("No returns to show."), sort
     if sort["col"] in table.columns:
         table = table.sort_values(sort["col"], ascending=sort["asc"],
                                   na_position="last")
 
-    selected = selected or []
-    since_label = pd.Timestamp(since).strftime("%d %b %y")
     sections = []
     for atype, grp in table.groupby("Type", sort=False):
         sections.append(html.Div([
@@ -124,14 +141,18 @@ def _table(store, since, _sorts, selected, sort):
     return html.Div(sections), sort
 
 
-def _group_table(df, since_label, sort, selected):
+def _group_table(df, since_label, sort, selected, gaps=None):
+    weights = gaps is not None
+
     def arrow(col):
         if sort["col"] == col:
             return " \u25B2" if sort["asc"] else " \u25BC"
         return " \u21C5"
 
-    cols = [("Fund", "Fund", "left"), ("Type", "Type", "center"),
-            ("Price", "Price", "right")]
+    cols = [("Fund", "Fund", "left"), ("Type", "Type", "center")]
+    if weights:
+        cols += [("Weight", universe.WEIGHT, "right")]
+    cols += [("Price", "Price", "right")]
     cols += [(c, c, "right") for c in RETURN_COLS[:-1]]
     cols += [(since_label, "Since", "right")]
 
@@ -149,18 +170,27 @@ def _group_table(df, since_label, sort, selected):
     for r in df.to_dict("records"):
         fid = r["fund_id"]
         picked = fid in selected
+        is_fund = bool(r.get("is_fund"))
         cells = [
             html.Td(html.Div(html.Span(_short(r["Fund"]), title=str(r["Fund"]))),
                     style={"padding": "3px 7px", "fontSize": "11px",
+                           "fontWeight": 700 if is_fund else 400,
                            "color": theme.INK, "whiteSpace": "nowrap",
                            "maxWidth": "190px", "overflow": "hidden",
                            "textOverflow": "ellipsis"}),
             html.Td(r["Type"], style={"padding": "3px 5px", "fontSize": "9px",
                     "textAlign": "center", "color": theme.SLATE}),
+        ]
+        if weights:
+            cells.append(html.Td(
+                universe.weight_text(r.get(universe.WEIGHT), is_fund),
+                style={"padding": "3px 7px", "fontSize": "11px",
+                       "textAlign": "right", **theme.NUM,
+                       "color": theme.NEUTRAL if is_fund else theme.TEXT}))
+        cells.append(
             html.Td(f"{r['Price']:.1f}" if pd.notna(r["Price"]) else "\u2014",
                     style={"padding": "3px 7px", "fontSize": "11px",
-                           "textAlign": "right", **theme.NUM, "color": theme.TEXT}),
-        ]
+                           "textAlign": "right", **theme.NUM, "color": theme.TEXT}))
         for col in RETURN_COLS:
             val = r[col]
             has = pd.notna(val)
@@ -176,7 +206,15 @@ def _group_table(df, since_label, sort, selected):
                             n_clicks=0,
                             className="cmp-picked" if picked else "",
                             style={"cursor": "pointer",
-                                   "borderBottom": f"1px solid {theme.LINE}"}))
+                                   "background": universe.FUND_ROW_BG
+                                   if is_fund else None,
+                                   "borderBottom": (f"2px solid {theme.LINE}"
+                                                    if is_fund else
+                                                    f"1px solid {theme.LINE}")}))
+    if weights:
+        body += universe.etf_gap_rows(
+            gaps, 1 + len(RETURN_COLS),
+            {"padding": "3px 7px", "fontSize": "11px"}, name_width="190px")
 
     return html.Table([head, html.Tbody(body)],
                       style={"width": "100%", "borderCollapse": "collapse"})

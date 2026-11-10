@@ -23,6 +23,10 @@ colours cannot be told apart in a scatter. Use the "Asset type" universe to
 look at one type, and the Type column in the table.
 
 Returns are in each instrument's own currency, like the other Markets tabs.
+
+In the "ETF" universe the table shows the fund first, then its holdings with
+their weight in the fund (sorted by weight to start with), then - greyed -
+the holdings it cannot place (no prices, or too little history).
 """
 
 import math
@@ -238,6 +242,13 @@ def _chart(store, horizon_name, bench_id, trails_on, picked):
 
     data = {"trend": h.trend, "recent": h.recent,
             "rows": _records(now)}
+    lay = universe.etf_layout(store, now, no_row="short history")
+    if lay is not None:
+        both = pd.concat([lay["fund"], lay["held"]], ignore_index=True)
+        data.update(rows=_records(both), etf=universe.etf_target(store),
+                    info=lay["info"],
+                    gaps=lay["gaps"].astype(object)
+                    .where(lay["gaps"].notna(), None).to_dict("records"))
     return fig, " \u00b7 ".join(parts), data
 
 
@@ -485,7 +496,8 @@ def _records(now):
     for r in now.to_dict("records"):
         rec = {}
         for k in ("fund_id", "name", "type", "quadrant", "x", "y",
-                  "r_trend", "r_recent", "vol", "value", "short", "held"):
+                  "r_trend", "r_recent", "vol", "value", "short", "held",
+                  universe.WEIGHT, "is_fund"):
             v = r.get(k)
             if isinstance(v, (float, np.floating)) and not np.isfinite(v):
                 v = None
@@ -512,18 +524,28 @@ def _table(data, _clicks, sort):
     trig = ctx.triggered_id
     if isinstance(trig, dict) and trig.get("type") == "mom-sort":
         col = trig["col"]
-        sort = ({"col": col, "asc": not sort["asc"]}
-                if sort["col"] == col else {"col": col, "asc": False})
+        sort = ({**sort, "col": col, "asc": not sort["asc"]}
+                if sort["col"] == col else {**sort, "col": col, "asc": False})
+    etf = (data or {}).get("etf")
+    sort = universe.etf_sort(sort, {"mode": "etf" if etf else None,
+                                    "etf": etf}, {"col": "x", "asc": False})
     if not data or not data.get("rows"):
         return "", sort
 
     df = pd.DataFrame(data["rows"])
+    if etf:
+        fund = df[df["is_fund"].fillna(False).astype(bool)]
+        df = df[~df["is_fund"].fillna(False).astype(bool)]
     if sort["col"] in df.columns:
         df = df.sort_values(sort["col"], ascending=sort["asc"],
                             na_position="last")
+    if etf:
+        df = pd.concat([fund, df], ignore_index=True)
 
-    cols = [("name", "Instrument", "left"), ("type", "Type", "left"),
-            ("quadrant", "Quadrant", "left"),
+    cols = [("name", "Instrument", "left"), ("type", "Type", "left")]
+    if etf:
+        cols += [(universe.WEIGHT, "Weight", "right")]
+    cols += [("quadrant", "Quadrant", "left"),
             ("x", "Trend \u03c3", "right"), ("y", "Recent \u03c3", "right"),
             ("r_trend", f"{data['trend']} %", "right"),
             ("r_recent", f"{data['recent']} %", "right"),
@@ -549,13 +571,22 @@ def _table(data, _clicks, sort):
             "borderBottom": f"1px solid {theme.LINE}"}
     num = {**cell, **theme.NUM, "textAlign": "right", "color": theme.INK}
     body = []
-    for r in df.to_dict("records"):
+    for r in df.where(df.notna(), None).to_dict("records"):
         name = _short(r["name"], 34) + (" \u25e6" if r["short"] else "")
-        body.append(html.Tr([
+        is_fund = bool(r.get("is_fund"))
+        lead = [
             html.Td(html.Span(name, title=str(r["name"])),
-                    style={**cell, "fontWeight": 600 if r["held"] else 400,
+                    style={**cell, "fontWeight": 700 if is_fund else
+                           (600 if r["held"] else 400),
                            "color": theme.INK}),
             html.Td(r["type"], style={**cell, "color": theme.SLATE}),
+        ]
+        if etf:
+            lead.append(html.Td(
+                universe.weight_text(r.get(universe.WEIGHT), is_fund),
+                style={**num, "color": theme.NEUTRAL if is_fund
+                       else theme.INK}))
+        body.append(html.Tr(lead + [
             html.Td(r["quadrant"] or "\u2014",
                     style={**cell, "color": theme.TEXT}),
             _sigma_cell(r["x"], num), _sigma_cell(r["y"], num),
@@ -566,11 +597,17 @@ def _table(data, _clicks, sort):
             html.Td(theme.money(r["value"]) if _ok(r["value"]) else "\u2014",
                     style=num),
             html.Td(pd.Timestamp(r["as_of"]).strftime("%d %b"), style=num),
-        ]))
+        ], style={"background": universe.FUND_ROW_BG if is_fund else None}))
+    if etf:
+        body += universe.etf_gap_rows(
+            pd.DataFrame(data.get("gaps") or [],
+                         columns=["name", universe.WEIGHT, "status"]),
+            len(cols) - 3, cell)
     note = html.Div("Bold = held. \u25e6 = short history.",
                     style={"fontSize": "10px", "color": theme.NEUTRAL,
                            "marginTop": "8px"})
-    return html.Div([html.Table([head, html.Tbody(body)],
+    caption = universe.etf_caption(data.get("info")) if etf else None
+    return html.Div([caption, html.Table([head, html.Tbody(body)],
                                 style={"width": "100%",
                                        "borderCollapse": "collapse"}),
                      note]), sort
