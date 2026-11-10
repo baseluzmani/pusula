@@ -49,6 +49,16 @@ def safe_float(val, multiply=1.0):
         return None
 
 
+def pct_float(val):
+    """A weight written as a percentage string, '10.47%' -> 10.47."""
+    return safe_float(str(val or '').replace('%', ''))
+
+
+# An ISIN sometimes turns up in a ticker column (WisdomTree writes LAM
+# Research as US5128073062). Moved to the isin field it resolves by ISIN.
+ISIN_RE = re.compile(r'^[A-Z]{2}[A-Z0-9]{9}\d$')
+
+
 def parse_ishares_csv(filepath):
     """iShares CSV. Header rows at top carry the date; data follows the
     column header row."""
@@ -268,8 +278,10 @@ def parse_xtrackers_xlsx(filepath):
 
 
 def parse_globalx_csv(filepath):
-    """Global X, two layouts: headers on row 1, or a multi-line header with
-    the date on row 2."""
+    """Global X, three layouts: AS_OF_DATE headers on row 1; a multi-line
+    header with the date on row 2; or (the site's download since Oct 2026)
+    'Net Assets (%),Ticker,Name,SEDOL,...' on row 1 with no date in the file,
+    which the importer then takes from the file name."""
     holdings, scraped_date = [], None
 
     SKIP_NAMES = {'CASH', 'OTHER PAYABLE & RECEIVABLES',
@@ -315,6 +327,29 @@ def parse_globalx_csv(filepath):
                 'weight_pct': weight, 'market_value': None,
                 'location': str(row.get('COUNTRY', '') or '').strip() or None,
                 'currency': None, 'isin': isin_val or None,
+                'sedol': sedol or None,
+            })
+    elif 'Net Assets (%)' in lines[0]:
+        for row in csv.DictReader(io.StringIO(''.join(lines))):
+            name = str(row.get('Name', '') or '').strip()
+            sedol = str(row.get('SEDOL', '') or '').strip()
+            ticker = str(row.get('Ticker', '') or '').strip()
+
+            if not name or name.upper() in SKIP_NAMES:
+                continue
+            if any(name.upper().startswith(p) for p in SKIP_PREFIXES):
+                continue
+            if not sedol and not ticker:
+                continue                  # cash and the disclaimer line
+            weight = pct_float(row.get('Net Assets (%)'))
+            if weight is None or weight <= 0:
+                continue                  # cash, FX and short lines
+
+            holdings.append({
+                'ticker': ticker, 'name': name, 'sector': None,
+                'asset_class': 'Equity', 'weight_pct': weight,
+                'market_value': safe_float(row.get('Market Value ($)')),
+                'location': None, 'currency': None, 'isin': None,
                 'sedol': sedol or None,
             })
     else:
@@ -390,8 +425,46 @@ def parse_hanetf_xlsx(filepath):
     return holdings, scraped_date
 
 
+def _parse_wisdomtree_current(filepath):
+    """WisdomTree US site download since Oct 2026: Group, Name, Security
+    Ticker, FIGI, Shares, Weight. Weight is a percentage string and there is
+    no date, so the importer dates it. Tickers are Bloomberg style ('IBM UN',
+    '6702 JT'), the same as the older file."""
+    holdings = []
+    with open(filepath, 'r', encoding='utf-8-sig') as f:
+        rows = list(csv.DictReader(f))
+
+    for row in rows:
+        row = {(k or '').strip(): (v or '').strip() for k, v in row.items()}
+        name = row.get('Name', '')
+        ticker = row.get('Security Ticker', '')
+        figi_val = row.get('FIGI', '')
+        if not name or name == 'nan':
+            continue
+        if ticker.upper() in ('', 'N/A') or figi_val.upper().startswith('CASH'):
+            continue                      # currency and money-market lines
+
+        isin_val = None
+        if ISIN_RE.match(ticker.upper()):
+            isin_val, ticker = ticker.upper(), ''
+
+        holdings.append({
+            'ticker': ticker, 'name': name, 'sector': row.get('Group') or None,
+            'asset_class': 'Equity', 'weight_pct': pct_float(row.get('Weight')),
+            'market_value': None, 'location': None, 'currency': None,
+            'isin': isin_val,
+        })
+    return holdings, None
+
+
 def parse_wisdomtree_csv(filepath):
-    """WisdomTree. Date in the first column, weight as a ratio."""
+    """WisdomTree, two layouts. The older file has a Date column and a ratio
+    weight; the current US download has neither (see above)."""
+    with open(filepath, 'r', encoding='utf-8-sig') as f:
+        header = [h.strip() for h in next(csv.reader(f), [])]
+    if 'Security Ticker' in header and 'Security Description' not in header:
+        return _parse_wisdomtree_current(filepath)
+
     holdings, scraped_date = [], None
 
     df = pd.read_csv(filepath)

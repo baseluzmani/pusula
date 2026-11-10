@@ -8,10 +8,12 @@ from core.repo import etf as repo
 from core.repo import funds as funds_repo
 from ui import figures
 from ui.layout import subtabs, card, placeholder
+from pages import etf_estimate
 
 dash.register_page(__name__, path="/etf", name="ETF", order=4)
 
-TABS = ["Holdings", "Changes", "Compare", "Fund compare", "Ticker map", "Sources"]
+TABS = ["Holdings", "Changes", "Compare", "Fund compare", "Day estimate",
+        "Ticker map", "Sources"]
 
 # One line per tab, explaining what this tab does that the others don't.
 # Leave a tab out entirely if its name is self-explanatory.
@@ -24,6 +26,9 @@ TAB_INTRO = {
                "genuinely sits in the same companies.",
     "Fund compare": "Any two holdings sets side by side - ETF, pension fund, "
                     "or a composite blended from several funds.",
+    "Day estimate": "Today's indicative move for funds that price late - "
+                    "the pension lines, SEMI after London closes, UC14 - "
+                    "from their holdings and live prices.",
     "Ticker map": "The identifier table tying provider tickers, ISINs and "
                   "SEDOLs to a single FIGI. Everything else depends on it.",
     "Sources": "Where each fund's holdings file comes from.",
@@ -926,6 +931,7 @@ def _render(tab):
         "Changes": _changes_view,
         "Compare": _compare_view,
         "Fund compare": _fund_compare_view,
+        "Day estimate": etf_estimate.render,
         "Ticker map": _map_view,
         "Sources": _sources_view,
     }

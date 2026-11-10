@@ -99,12 +99,16 @@ def _resolve(ticker, name, isin, smap, lookups, parents) -> tuple[str, str, str 
     t = str(ticker).strip().upper() if ticker else ""
     base = t.split()[0] if t else ""
 
-    idx = (lookups["bloomberg_code"].get(t)
-           or lookups["raw_ticker"].get(t)
-           or lookups["base_ticker"].get(t)
-           or (lookups["base_ticker"].get(base) if base else None)
-           or lookups["sedol"].get(t)
-           or lookups["isin"].get(t))
+    # First hit wins. Not an `or` chain: the map's first row has index 0,
+    # which is falsy, so that stock never resolved.
+    idx = next((i for i in (
+        lookups["bloomberg_code"].get(t),
+        lookups["raw_ticker"].get(t),
+        lookups["base_ticker"].get(t),
+        lookups["base_ticker"].get(base) if base else None,
+        lookups["sedol"].get(t),
+        lookups["isin"].get(t),
+    ) if i is not None), None)
 
     if idx is None and isin and str(isin).lower() not in ("nan", "none", ""):
         idx = lookups["isin"].get(str(isin).strip().upper())
@@ -135,6 +139,57 @@ FT_EXCH = {
     "ASE": ("US",), "PCQ": ("US",), "GER": ("GR",), "PAR": ("FP",),
     "AEX": ("NA",), "SWX": ("SW",), "TOR": ("CN",),
 }
+
+
+# FT exchange suffix -> Yahoo suffix. Used when the ticker map has no record
+# for a pension-fund holding: the FT ticker alone is enough to price it
+# ("7203:TYO" -> "7203.T"). Every symbol made this way is checked on Yahoo
+# by scripts/add_constituents.py before an instrument is created for it.
+FT_TO_YAHOO = {
+    # Americas
+    "NYQ": "", "NSQ": "", "NAS": "", "NMQ": "", "ASE": "", "PCQ": "",
+    "TOR": ".TO", "SAO": ".SA", "MEX": ".MX",
+    # Europe
+    "LSE": ".L", "GER": ".DE", "PAR": ".PA", "AEX": ".AS", "MCE": ".MC",
+    "MIL": ".MI", "BRU": ".BR", "LIS": ".LS", "STO": ".ST", "CPH": ".CO",
+    "HEL": ".HE", "OSL": ".OL", "ISE": ".IR", "VIE": ".VI", "WSE": ".WA",
+    "VTX": ".SW", "SWX": ".SW", "IST": ".IS",
+    # Asia-Pacific, Africa
+    "TYO": ".T", "HKG": ".HK", "TAI": ".TW", "TWO": ".TWO", "KSC": ".KS",
+    "KOE": ".KQ", "SES": ".SI", "ASX": ".AX", "NZC": ".NZ", "SHH": ".SS",
+    "SHZ": ".SZ", "NSI": ".NS", "BSE": ".BO", "BKK": ".BK", "KLS": ".KL",
+    "JKT": ".JK", "PHS": ".PS", "JNB": ".JO",
+}
+
+
+def yahoo_from_ft(ticker) -> str | None:
+    """
+    A Yahoo fund_id built from an FT ticker, or None.
+
+        7203:TYO -> YF:7203.T      NESN:VTX -> YF:NESN.SW
+        BP.:LSE  -> YF:BP.L        BT.A:LSE -> YF:BT-A.L
+        700:HKG  -> YF:0700.HK     BRK.B:NYQ -> YF:BRK-B
+        TSLA:NSQ -> YF:TSLA        SAPX:GER -> YF:SAP.DE
+
+    FT ends some London tickers with a dot and writes share classes with
+    one; Yahoo drops the trailing dot and uses a dash. Hong Kong codes are
+    padded to four digits. FT marks a Xetra quote with a trailing X (SAPX,
+    ALVX); Yahoo's .DE symbol is the plain ticker.
+    """
+    t = str(ticker or "").strip().upper()
+    if ":" not in t:
+        return None
+    sym, exch = t.rsplit(":", 1)
+    suffix = FT_TO_YAHOO.get(exch)
+    sym = sym.strip().rstrip(".")
+    if suffix is None or not sym or sym in ("-", "--"):
+        return None
+    sym = sym.replace(".", "-").replace("/", "-")
+    if exch == "HKG" and sym.isdigit():
+        sym = sym.zfill(4)
+    if exch == "GER" and len(sym) >= 3 and sym.endswith("X"):
+        sym = sym[:-1]
+    return f"YF:{sym}{suffix}"
 
 
 def resolve_fund_holding(ticker, name) -> tuple[str, str, bool] | None:
@@ -171,6 +226,19 @@ def resolve_fund_holding(ticker, name) -> tuple[str, str, bool] | None:
     code = parent.get("bloomberg_code") or row["bloomberg_code"] or t
     code = str(code or "").split("(")[0].strip()
     return str(gfigi), code, str(row["figi"]) == str(gfigi)
+
+
+def group_yahoo(group_figi) -> str | None:
+    """The Yahoo symbol of a ticker-map group (its parent row), or None.
+
+    Used to price pension-fund holdings, which resolve to a group FIGI but
+    carry no Yahoo id of their own."""
+    if not group_figi:
+        return None
+    _, _, parents = _stock_map()
+    value = parents.get(str(group_figi), {}).get("yahoo_id")
+    text = str(value).strip() if value is not None else ""
+    return text if text and text.lower() not in ("nan", "none") else None
 
 
 # --- Consolidated holdings ----------------------------------------------

@@ -6,8 +6,13 @@ etf_holdings, then resolves any new tickers to stock_identifier_map.
 
 Files are matched to an ETF by their filename prefix: AINF_20260610.csv maps
 through instruments.source_id to a fund_id, and instruments.provider chooses
-the parser. The as-of date is always read from inside the file, never from the
-name, because a file is often downloaded days after the date it describes.
+the parser. A prefix ending at '-' works too, so a Global X download
+(GNOM-holdings-Oct-23-2026.csv) needs no renaming.
+
+The as-of date is read from inside the file, because a file is often
+downloaded days after the date it describes. Some downloads (Global X and
+WisdomTree since Oct 2026) carry no date at all; for those a full date in the
+file name is used if there is one, and today only if there is not.
 
 This used to be a script under FTScrapper, run as a subprocess with its output
 captured as text, which meant the Data page could report only whether the
@@ -25,8 +30,9 @@ Usage
 
 from __future__ import annotations
 
+import re
 import sys
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from core import config, db
@@ -101,6 +107,44 @@ def insert_holdings(conn, etf_fund_id, scraped_date, holdings):
     return inserted, errors
 
 
+def match_prefix(stem: str, fund_id_map: dict):
+    """(prefix, fund_id) for a file name. The part before the first '_' is
+    tried first, then the part before the first '-'. fund_id is None when
+    neither is known, and the '_' prefix is the one reported."""
+    first = stem.split('_')[0].upper()
+    for prefix in (first, stem.split('-')[0].upper()):
+        if prefix in fund_id_map:
+            return prefix, fund_id_map[prefix]
+    return first, None
+
+
+# Full dates a provider puts in a download's name: Oct-23-2026, 2026-10-23,
+# 20261023. A partial one such as '2710' is ignored.
+_NAME_DATES = (
+    (re.compile(r'([A-Za-z]{3}-\d{1,2}-\d{4})'), '%b-%d-%Y'),
+    (re.compile(r'(\d{4}-\d{2}-\d{2})'), '%Y-%m-%d'),
+    (re.compile(r'(?<!\d)(\d{8})(?!\d)'), '%Y%m%d'),
+)
+
+
+def date_from_name(name: str, today: date | None = None):
+    """A full date in the file name, as YYYY-MM-DD, or None.
+
+    Only dates in the past year count, so a download id that happens to be
+    eight digits (fund-holdings-58730141) is not read as a date.
+    """
+    today = today or date.today()
+    for pattern, fmt in _NAME_DATES:
+        for found in pattern.findall(name):
+            try:
+                d = datetime.strptime(found, fmt).date()
+            except ValueError:
+                continue
+            if today - timedelta(days=366) <= d <= today:
+                return d.strftime('%Y-%m-%d')
+    return None
+
+
 def import_file(conn, filepath: Path, fund_id_map=None,
                 provider_map=None) -> dict:
     """
@@ -117,8 +161,7 @@ def import_file(conn, filepath: Path, fund_id_map=None,
         provider_map = ticker_repo.etf_provider_map()
 
     name = filepath.name
-    prefix = filepath.stem.split('_')[0].upper()
-    etf_fund_id = fund_id_map.get(prefix)
+    prefix, etf_fund_id = match_prefix(filepath.stem, fund_id_map)
 
     if not etf_fund_id:
         return {"file": name, "status": "error", "rows": 0,
@@ -142,9 +185,13 @@ def import_file(conn, filepath: Path, fund_id_map=None,
         return {"file": name, "status": "error", "rows": 0,
                 "message": f"No holdings found - is this a {provider} file?"}
 
-    dated_from_file = scraped_date is not None
+    date_note = ""
+    if not scraped_date:
+        scraped_date = date_from_name(name)
+        date_note = " - date from the file name"
     if not scraped_date:
         scraped_date = datetime.now().strftime('%Y-%m-%d')
+        date_note = " - no date in file, used today"
 
     if already_imported(conn, etf_fund_id, scraped_date):
         return {"file": name, "status": "skipped", "rows": 0,
@@ -156,8 +203,7 @@ def import_file(conn, filepath: Path, fund_id_map=None,
     message = f"{inserted} rows"
     if errors:
         message += f", {errors} row errors"
-    if not dated_from_file:
-        message += " - no date in file, used today"
+    message += date_note
     return {"file": name, "status": "imported", "rows": inserted,
             "fund_id": etf_fund_id, "date": scraped_date, "message": message}
 

@@ -21,8 +21,29 @@ def list_funds() -> pd.DataFrame:
         "ORDER BY fund_name")
 
 
+def holdings_source(fund_id: str) -> str:
+    """The pension_holdings fund_id that holds this fund's holdings.
+
+    Normally the fund itself. A wrapper whose FT page has no holdings - the
+    Fidelity HSBC Islamic line, 0P0001EWE2 - can point instruments.holdings_id
+    at the underlying fund, and its holdings are read from there until the
+    FT scraper has stored some under the wrapper's own id."""
+    own = db.query("SELECT 1 FROM pension_holdings WHERE fund_id = ? LIMIT 1",
+                   (fund_id,))
+    if not own.empty:
+        return fund_id
+    link = db.query("SELECT holdings_id FROM instruments WHERE fund_id = ?",
+                    (fund_id,))
+    target = str(link["holdings_id"].iloc[0] or "").strip() \
+        if not link.empty and link["holdings_id"].iloc[0] is not None else ""
+    if target and target != fund_id and not target.startswith("http"):
+        return target
+    return fund_id
+
+
 def effective_date(fund_id: str, as_of: str | None = None) -> str | None:
     """Latest snapshot on or before as_of. Latest overall if as_of is None."""
+    fund_id = holdings_source(fund_id)
     if as_of:
         df = db.query(
             "SELECT MAX(scraped_date) AS d FROM pension_holdings "
@@ -35,13 +56,14 @@ def effective_date(fund_id: str, as_of: str | None = None) -> str | None:
 
 
 def fund_holdings(fund_id: str, as_of: str | None = None) -> tuple[pd.DataFrame, str | None]:
-    date = effective_date(fund_id, as_of)
+    source = holdings_source(fund_id)
+    date = effective_date(source, as_of)
     if not date:
         return pd.DataFrame(columns=["rank", "name", "ticker", "weight_pct",
-                                     "key"]), None
+                                     "key", "yahoo_id"]), None
     df = db.query(
         "SELECT rank, name, ticker, weight_pct FROM pension_holdings "
-        "WHERE fund_id = ? AND scraped_date = ? ORDER BY rank", (fund_id, date))
+        "WHERE fund_id = ? AND scraped_date = ? ORDER BY rank", (source, date))
     return _consolidate(df), date
 
 
@@ -54,27 +76,34 @@ def _consolidate(df: pd.DataFrame) -> pd.DataFrame:
     keep their FT name as the key, as before.
     """
     if df.empty:
-        return df.assign(key=pd.Series(dtype=str))
-    keys, tickers, parent = [], [], []
+        return df.assign(key=pd.Series(dtype=str),
+                         yahoo_id=pd.Series(dtype=object))
+    keys, tickers, parent, yahoo = [], [], [], []
     for r in df.itertuples():
-        hit = etf_repo.resolve_fund_holding(r.ticker, r.name)
+        ft = r.ticker if isinstance(r.ticker, str) else ""
+        hit = etf_repo.resolve_fund_holding(ft, r.name)
         if hit:
             keys.append(hit[0]); tickers.append(hit[1]); parent.append(hit[2])
+            # The map's Yahoo symbol, else one built from the FT ticker.
+            yahoo.append(etf_repo.group_yahoo(hit[0])
+                         or etf_repo.yahoo_from_ft(ft))
         else:
             keys.append("NAME:" + str(r.name).strip().upper())
-            tickers.append(r.ticker or ""); parent.append(True)
-    df = df.assign(key=keys, ticker=tickers, _parent=parent,
+            tickers.append(ft); parent.append(True)
+            yahoo.append(etf_repo.yahoo_from_ft(ft))
+    df = df.assign(key=keys, ticker=tickers, _parent=parent, yahoo_id=yahoo,
                    name=df["name"].astype(str).str.strip())
     # Parent rows first so "first" picks the common share's name and ticker.
     df = df.sort_values("_parent", ascending=False, kind="stable")
     out = (df.groupby("key", sort=False)
              .agg(name=("name", "first"), ticker=("ticker", "first"),
-                  weight_pct=("weight_pct", "sum"))
+                  weight_pct=("weight_pct", "sum"),
+                  yahoo_id=("yahoo_id", "first"))
              .reset_index()
              .sort_values("weight_pct", ascending=False)
              .reset_index(drop=True))
     out.insert(0, "rank", range(1, len(out) + 1))
-    return out[["rank", "name", "ticker", "weight_pct", "key"]]
+    return out[["rank", "name", "ticker", "weight_pct", "key", "yahoo_id"]]
 
 
 def unmapped_fund_names(limit: int = 40) -> pd.DataFrame:
@@ -132,14 +161,20 @@ def composite_holdings(composite_id: str,
                 continue
             entry = merged.setdefault(row.key, {"name": row.name,
                                                 "weight": 0.0,
-                                                "ticker": row.ticker or ""})
+                                                "ticker": row.ticker or "",
+                                                "yahoo_id": None})
             entry["weight"] += share * row.weight_pct
+            # NaN is truthy, so test for a real string.
+            if not entry["yahoo_id"] and isinstance(row.yahoo_id, str) \
+                    and row.yahoo_id:
+                entry["yahoo_id"] = row.yahoo_id
 
     if not merged:
         return pd.DataFrame(columns=["rank", "name", "ticker", "weight_pct"]), None
 
     out = (pd.DataFrame([{"name": v["name"], "ticker": v["ticker"],
-                          "weight_pct": round(v["weight"], 2)}
+                          "weight_pct": round(v["weight"], 2),
+                          "yahoo_id": v["yahoo_id"]}
                          for v in merged.values()])
            .sort_values("weight_pct", ascending=False)
            .reset_index(drop=True))
@@ -224,7 +259,8 @@ def holdings_for(selection: str,
     """
     Resolve any prefixed selection to (holdings, display_name, effective_date).
 
-    Holdings columns: rank, name, ticker, weight_pct.
+    Holdings columns: rank, name, ticker, weight_pct, plus yahoo_id (None
+    where the ticker map has no Yahoo symbol) when there are holdings.
     """
     empty = pd.DataFrame(columns=["rank", "name", "ticker", "weight_pct"])
     if not selection:
@@ -242,7 +278,7 @@ def holdings_for(selection: str,
         if df.empty:
             return empty, ident, None
         name = db.query("SELECT fund_name FROM pension_holdings "
-                        "WHERE fund_id = ? LIMIT 1", (ident,))
+                        "WHERE fund_id = ? LIMIT 1", (holdings_source(ident),))
         return df, (name["fund_name"].iloc[0] if not name.empty else ident), date
 
     if kind == "ETF":
@@ -250,10 +286,11 @@ def holdings_for(selection: str,
         if not date:
             return empty, universe.label(ident), None
         df = etf_repo.holdings(ident, date)
-        out = df[["name", "weight_pct"]].copy()
+        out = df[["name", "weight_pct", "yahoo_id"]].copy()
         out["ticker"] = df["canonical_id"].astype(str).str[:14]
         out.insert(0, "rank", range(1, len(out) + 1))
-        return out[["rank", "name", "ticker", "weight_pct"]], universe.label(ident), date
+        return (out[["rank", "name", "ticker", "weight_pct", "yahoo_id"]],
+                universe.label(ident), date)
 
     return empty, "-", None
 
