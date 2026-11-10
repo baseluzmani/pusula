@@ -14,7 +14,11 @@ Three parts:
                     active - edited in place, written with Save. Coverage
                     columns show how much of each fund can be priced.
     Selected fund   click a row: its holdings and why each one is or is not
-                    priced. "Add missing instruments" runs add_constituents
+                    priced. Delete (with a confirm step) removes the target
+                    and its basket rows; instruments, prices, holdings data
+                    and Monitor levels are kept. The built-in UC14 / AIGA
+                    baskets are hidden instead (they would be re-added at
+                    start-up). "Add missing instruments" runs add_constituents
                     for that fund in the background (backup, Yahoo check,
                     insert, then Yahoo history for the new rows) and shows
                     its log here. For a basket, its futures and weights.
@@ -96,6 +100,21 @@ def _button(label, id_, primary=False):
         "border": "none" if primary else f"1px solid {theme.LINE}",
         "backgroundColor": theme.NEEDLE if primary else theme.SURFACE,
         "color": "#fff" if primary else theme.INK})
+
+
+def _danger(solid):
+    return {"padding": "6px 13px", "borderRadius": "5px", "fontSize": "12px",
+            "fontWeight": 600, "cursor": "pointer", "whiteSpace": "nowrap",
+            "border": f"1px solid {theme.NEGATIVE}",
+            "backgroundColor": theme.NEGATIVE if solid else theme.SURFACE,
+            "color": "#fff" if solid else theme.NEGATIVE}
+
+
+def _plain():
+    return {"padding": "6px 13px", "borderRadius": "5px", "fontSize": "12px",
+            "fontWeight": 600, "cursor": "pointer",
+            "border": f"1px solid {theme.LINE}",
+            "backgroundColor": theme.SURFACE, "color": theme.INK}
 
 
 def render():
@@ -184,7 +203,20 @@ def render():
         # --- Selected fund --------------------------------------------------
         html.Div(id="etft-detail-wrap", style={"display": "none"}, children=[
             html.Div([
-                html.Div(id="etft-detail-head"),
+                html.Div([
+                    html.Div(id="etft-detail-head", style={"flex": "1"}),
+                    html.Div([
+                        html.Button("Delete", id="etft-del", n_clicks=0,
+                                    style=_danger(False)),
+                        html.Button("", id="etft-del-yes", n_clicks=0,
+                                    style={**_danger(True),
+                                           "display": "none"}),
+                        html.Button("Cancel", id="etft-del-no", n_clicks=0,
+                                    style={**_plain(), "display": "none"}),
+                    ], style={"display": "flex", "gap": "8px",
+                              "alignItems": "flex-start"}),
+                ], style={"display": "flex", "alignItems": "flex-start",
+                          "gap": "12px"}),
 
                 # Basket weights (baskets only)
                 html.Div(id="etft-basket-wrap", style={"display": "none"},
@@ -469,6 +501,48 @@ def _basket_save(_n, key, rows, refresh):
         return "Select a basket first.", no_update
     _, message = repo.save_basket(key, rows)
     return message, (refresh or 0) + 1
+
+
+# --- Delete -------------------------------------------------------------------------
+# Two steps: Delete swaps itself for "Confirm delete: <label>" and Cancel;
+# picking another fund resets them.
+
+@callback(
+    Output("etft-del", "style"),
+    Output("etft-del-yes", "style"),
+    Output("etft-del-yes", "children"),
+    Output("etft-del-no", "style"),
+    Input("etft-del", "n_clicks"),
+    Input("etft-del-no", "n_clicks"),
+    Input("etft-key", "data"),
+    Input("etft-refresh", "data"),
+    prevent_initial_call=True,
+)
+def _del_ask(_d, _n, key, _refresh):
+    hidden = {"display": "none"}
+    if ctx.triggered_id == "etft-del" and key:
+        row = repo.target(key)
+        label = row["label"] if row else key
+        return ({**_danger(False), **hidden}, _danger(True),
+                f"Confirm delete: {label}", _plain())
+    return _danger(False), {**_danger(True), **hidden}, "", \
+        {**_plain(), **hidden}
+
+
+@callback(
+    Output("etft-feedback", "children", allow_duplicate=True),
+    Output("etft-key", "data", allow_duplicate=True),
+    Output("etft-refresh", "data", allow_duplicate=True),
+    Input("etft-del-yes", "n_clicks"),
+    State("etft-key", "data"), State("etft-refresh", "data"),
+    prevent_initial_call=True,
+)
+def _delete(n, key, refresh):
+    if not n or not key:
+        return no_update, no_update, no_update
+    deleted, message = repo.delete_target(key)
+    return (_msg(message, deleted), None if deleted else key,
+            (refresh or 0) + 1)
 
 
 # --- Add missing instruments (background job) -----------------------------------------

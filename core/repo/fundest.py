@@ -508,6 +508,36 @@ def add_target(selection: str, label: str | None = None,
                   f"Added {label}, but it has no holdings on file yet."), key
 
 
+def delete_target(key: str) -> tuple[bool, str]:
+    """
+    Remove a target and, for a basket, its components. Returns (deleted,
+    message).
+
+    The built-in baskets (BASKETS: UC14, AIGA) are re-added at start-up
+    whenever their row is missing, so deleting one would not last: they are
+    hidden instead (active = 0), and (False, message) says so.
+
+    Nothing else is touched: instruments added for the holdings and their
+    prices, the holdings data and Monitor levels all stay.
+    """
+    ensure_tables()
+    row = target(key)
+    if row is None:
+        return False, f"{key} is not a target."
+    if key in BASKETS:
+        db.execute("UPDATE etf_est_targets SET active = 0 WHERE target = ?",
+                   (key,))
+        return False, (f"{row['label']} is a built-in basket and would come "
+                       "back on the next restart, so it was hidden instead "
+                       "(Active = 0).")
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM etf_est_basket WHERE target = ?", (key,))
+        conn.execute("DELETE FROM etf_est_targets WHERE target = ?", (key,))
+    _MEMBERS_CACHE.pop(key, None)
+    return True, (f"Deleted {row['label']}. Its instruments and prices are "
+                  "kept.")
+
+
 def save_basket(key: str, rows: list[dict]) -> tuple[int, str]:
     """Replace a basket's components with ``rows`` (fund_id, weight). Symbols
     are stored YF:-prefixed; blank rows and weights <= 0 are dropped.

@@ -241,3 +241,28 @@ def test_etf_sort():
     assert other["col"] == "weight" and other["etf"] == "B"
     assert universe.etf_sort(clicked, {"mode": "holdings"}, default) == default
     assert universe.etf_sort(default, {"mode": "holdings"}, default) == default
+
+
+def test_delete_target(fund_db):
+    ok, _, key = est_repo.add_target("cocoa", "Cocoa", "YF:COCO.L",
+                                     kind="basket")
+    est_repo.save_basket(key, [{"fund_id": "CC=F", "weight": 100}])
+    deleted, msg = est_repo.delete_target(key)
+    assert deleted and "kept" in msg
+    assert est_repo.target(key) is None
+    assert est_repo.basket(key).empty
+    # Holdings target: the row goes, the instruments stay.
+    deleted, _ = est_repo.delete_target("COMPOSITE:HSBC_EM")
+    assert deleted and est_repo.target("COMPOSITE:HSBC_EM") is None
+    assert est_repo.instrument_meta(["YF:NVDA"]).shape[0] == 1
+    assert "COMPOSITE:HSBC_EM" in {o["value"]
+                                   for o in est_repo.candidate_options()}
+    # Built-in basket: hidden, weights kept, still there after a restart.
+    deleted, msg = est_repo.delete_target("BASKET:UC14")
+    assert not deleted and "hidden" in msg
+    est_repo._ready = False
+    row = est_repo.target("BASKET:UC14")
+    assert row is not None and int(row["active"]) == 0
+    assert not est_repo.basket("BASKET:UC14").empty
+    assert "BASKET:UC14" not in set(est_repo.targets()["target"])
+    assert est_repo.delete_target("NOPE")[0] is False
