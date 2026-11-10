@@ -22,6 +22,7 @@ Usage
 -----
     python3 -m importers.yahoo_prices             # every tracked ticker
     python3 -m importers.yahoo_prices ^GSPC       # one ticker
+    python3 -m importers.yahoo_prices SAP.DE ALV.DE   # several
 """
 
 from __future__ import annotations
@@ -206,11 +207,17 @@ def _rebuild_composites():
         print(f"  ERROR building composites: {exc}")
 
 
-def run(ticker: str | None = None) -> dict:
-    """Fetch and store price history. Returns a summary for the registry."""
+def run(ticker: str | None = None, tickers: list[str] | None = None) -> dict:
+    """Fetch and store price history. Returns a summary for the registry.
+
+    ``tickers`` limits the run to those tracked symbols (Data -> ETF targets
+    uses it to fetch history for the instruments it has just added)."""
     all_tickers = ticker_repo.yahoo_tickers()
 
-    if ticker:
+    if tickers:
+        wanted = {t.upper() for t in tickers}
+        selected = [t for t in all_tickers if t[0].upper() in wanted]
+    elif ticker:
         wanted = ticker.upper()
         match = next((t for t in all_tickers if t[0].upper() == wanted), None)
         if match:
@@ -296,4 +303,8 @@ def run(ticker: str | None = None) -> dict:
 
 
 if __name__ == "__main__":
-    run(sys.argv[1] if len(sys.argv) > 1 else None)
+    args = sys.argv[1:]
+    if len(args) > 1:
+        run(tickers=args)
+    else:
+        run(args[0] if args else None)

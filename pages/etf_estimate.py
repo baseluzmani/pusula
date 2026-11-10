@@ -12,9 +12,10 @@ registered page. No SQL: data comes from core/repo/fundest.py, arithmetic
 from core/fundest.py.
 
 What is estimated is listed in etf_est_targets (seeded with SEMI, every
-COMPOSITE:HSBC_* composite and a UC14 futures basket). Holdings without a
-Yahoo instrument are reported as not priced; scripts/add_constituents.py
-creates the missing instruments.
+COMPOSITE:HSBC_* composite and the UC14 / AIGA futures baskets), edited on
+Data -> ETF targets. Holdings without a Yahoo instrument are reported as not
+priced; Add missing instruments on that tab (scripts/add_constituents.py)
+creates them.
 """
 
 from __future__ import annotations
@@ -318,10 +319,10 @@ def _detail(target, store):
         w = missing["weight_pct"].sum()
         count = missing["status"].value_counts()
         fixes = {
-            fe.STATUS_MISSING: "not in instruments - run "
-                               "scripts/add_constituents.py",
-            fe.STATUS_NO_PRICES: "no prices yet - run "
-                                 "importers.yahoo_prices",
+            fe.STATUS_MISSING: "not in instruments - Data > ETF targets "
+                               "> Add missing instruments",
+            fe.STATUS_NO_PRICES: "no prices yet - the same button "
+                                 "fetches them",
             fe.STATUS_UNMAPPED: "no Yahoo symbol - set it in ETF > "
                                 "Ticker map",
         }

@@ -172,7 +172,8 @@ def targets() -> pd.DataFrame:
 
 
 def target(key: str) -> dict | None:
-    df = targets()
+    """One target by key, hidden (active = 0) ones included."""
+    df = all_targets()
     hit = df[df["target"] == key]
     return hit.iloc[0].to_dict() if not hit.empty else None
 
@@ -280,3 +281,260 @@ def _text(value) -> str | None:
         return None
     text = str(value).strip()
     return text if text and text.lower() not in ("nan", "none") else None
+
+
+# --- Markets: one estimated fund as a universe --------------------------------
+#
+# Markets -> Universe -> ETF lists a target's own price series and what it
+# holds, with each holding's weight shown beside its returns. Weights are for
+# display only; nothing is calculated from them there.
+
+STATUS_FUND = "fund"
+STATUS_OK = "priced"
+STATUS_NO_PRICES = "no prices"
+STATUS_MISSING = "not in instruments"
+STATUS_UNMAPPED = "no Yahoo symbol"
+
+_MEMBERS_CACHE: dict = {}
+_MEMBERS_MAX = 20
+
+
+def members(key: str) -> tuple[pd.DataFrame, dict]:
+    """
+    The fund and its holdings, for the Markets "ETF" universe and the
+    Data -> ETF targets coverage view.
+
+    Frame columns: fund_id (None for a holding with no Yahoo symbol), name,
+    weight_pct (None on the fund row), ticker, status (STATUS_*), is_fund.
+    The fund row comes first, then holdings by weight.
+
+    info: target, label, kind, actual_fund_id, holdings_date, listed (sum of
+    the weights on file), holdings (count), priced (count), priced_weight.
+
+    Cached per target until the database changes (the same fingerprint the
+    returns table uses), because every Markets tab asks for it.
+    """
+    from core.repo import market      # local: market is the heavier module
+
+    stamp = market._db_stamp()
+    hit = _MEMBERS_CACHE.get(key)
+    if hit and hit[0] == stamp:
+        return hit[1].copy(), dict(hit[2])
+
+    cols = ["fund_id", "name", "weight_pct", "ticker", "status", "is_fund"]
+    row = target(key)
+    if row is None:
+        return pd.DataFrame(columns=cols), {}
+
+    hold, hdate = constituents(row)
+    actual = _text(row.get("actual_fund_id"))
+    ids = [f for f in hold["fund_id"].dropna()] if not hold.empty else []
+    meta = instrument_meta(ids + ([actual] if actual else []))
+    known = set(meta["fund_id"]) if not meta.empty else set()
+    priced = _priced_ids(list(known))
+
+    def status(fid):
+        if not fid:
+            return STATUS_UNMAPPED
+        if fid not in known:
+            return STATUS_MISSING
+        return STATUS_OK if fid in priced else STATUS_NO_PRICES
+
+    rows = []
+    if actual:
+        name = dict(zip(meta["fund_id"], meta["name"])).get(actual) \
+            if not meta.empty else None
+        rows.append({"fund_id": actual, "name": name or row["label"],
+                     "weight_pct": None, "ticker": actual,
+                     "status": STATUS_FUND if actual in known
+                     else STATUS_MISSING, "is_fund": True})
+    for h in hold.to_dict("records"):
+        fid = h["fund_id"] if isinstance(h["fund_id"], str) else None
+        if fid and fid == actual:
+            continue
+        rows.append({"fund_id": fid, "name": h["name"],
+                     "weight_pct": float(h["weight_pct"]),
+                     "ticker": h.get("ticker") or "", "status": status(fid),
+                     "is_fund": False})
+    df = pd.DataFrame(rows, columns=cols)
+
+    held = df[~df["is_fund"]]
+    ok = held[held["status"] == STATUS_OK]
+    info = {"target": key, "label": row["label"], "kind": row["kind"],
+            "actual_fund_id": actual, "holdings_date": hdate,
+            "listed": float(held["weight_pct"].sum()) if not held.empty
+            else 0.0,
+            "holdings": int(len(held)), "priced": int(len(ok)),
+            "priced_weight": float(ok["weight_pct"].sum()) if not ok.empty
+            else 0.0}
+
+    if len(_MEMBERS_CACHE) >= _MEMBERS_MAX:
+        _MEMBERS_CACHE.pop(next(iter(_MEMBERS_CACHE)))
+    _MEMBERS_CACHE[key] = (stamp, df, info)
+    return df.copy(), dict(info)
+
+
+def member_ids(key: str) -> list[str]:
+    """The fund and every holding that has an instruments row, fund first -
+    what the Markets tabs load for the "ETF" universe."""
+    df, _ = members(key)
+    if df.empty:
+        return []
+    keep = df[df["fund_id"].notna()
+              & ~df["status"].isin([STATUS_MISSING, STATUS_UNMAPPED])]
+    return list(dict.fromkeys(keep["fund_id"]))
+
+
+def _priced_ids(fund_ids: list[str]) -> set:
+    ids = sorted({f for f in fund_ids if f})
+    if not ids:
+        return set()
+    marks = ",".join("?" * len(ids))
+    df = db.query(f"SELECT DISTINCT fund_id FROM prices "
+                  f"WHERE fund_id IN ({marks})", tuple(ids))
+    return set(df["fund_id"]) if not df.empty else set()
+
+
+# --- Data -> ETF targets: editing the targets from the page --------------------
+
+TARGET_EDITABLE = ("label", "actual_fund_id", "residual_fund_id", "hedged",
+                   "sort_order", "active")
+
+
+def all_targets() -> pd.DataFrame:
+    """Every target, hidden ones included, in page order."""
+    ensure_tables()
+    return db.query("""
+        SELECT target, label, kind, actual_fund_id, residual_fund_id,
+               COALESCE(hedged, 0) AS hedged, sort_order,
+               COALESCE(active, 1) AS active
+        FROM etf_est_targets
+        ORDER BY sort_order, label
+    """)
+
+
+def save_targets(rows: list[dict]) -> int:
+    """Write the editable fields of existing targets. The key and kind are
+    never changed here. Returns the number of rows written."""
+    ensure_tables()
+    written = 0
+    with db.get_conn() as conn:
+        for r in rows or []:
+            key = _text(r.get("target"))
+            label = _text(r.get("label"))
+            if not key or not label:
+                continue
+            conn.execute("""
+                UPDATE etf_est_targets
+                SET label = ?, actual_fund_id = ?, residual_fund_id = ?,
+                    hedged = ?, sort_order = ?, active = ?
+                WHERE target = ?
+            """, (label, _text(r.get("actual_fund_id")),
+                  _text(r.get("residual_fund_id")),
+                  1 if _int(r.get("hedged"), 0) else 0,
+                  _int(r.get("sort_order"), 50),
+                  1 if _int(r.get("active"), 1) else 0, key))
+            written += 1
+    return written
+
+
+def candidate_options() -> list[dict]:
+    """Funds with holdings that are not a target yet: the composites, pension
+    funds and ETFs of ETF -> Fund compare, with the same labels."""
+    have = set(all_targets()["target"])
+    return [o for o in funds_repo.options() if o["value"] not in have]
+
+
+def suggested(selection: str) -> dict:
+    """Label and own price series to pre-fill for a new holdings target."""
+    kind, _, ident = str(selection or "").partition(":")
+    label = next((o["label"].split(" - ", 1)[-1]
+                  for o in funds_repo.options() if o["value"] == selection),
+                 ident)
+    actual = selection if kind == "COMPOSITE" else ident
+    return {"label": label, "actual_fund_id": actual or None}
+
+
+def basket_key(name: str) -> str | None:
+    """BASKET:<NAME> from what was typed: upper case, letters, digits and _
+    only."""
+    text = "".join(ch for ch in str(name or "").upper().strip()
+                   if ch.isalnum() or ch == "_")
+    text = text.removeprefix("BASKET")
+    return f"BASKET:{text}" if text else None
+
+
+def add_target(selection: str, label: str | None = None,
+               actual_fund_id: str | None = None, kind: str = "holdings"
+               ) -> tuple[bool, str, str | None]:
+    """
+    Add a target. ``kind`` 'holdings' takes a Fund compare selection
+    (COMPOSITE:..., FUND:..., ETF:...); 'basket' takes a name and starts with
+    no components - add them in the weights editor.
+
+    Returns (ok, message, target key).
+    """
+    ensure_tables()
+    have = set(all_targets()["target"])
+    if kind == "basket":
+        key = basket_key(selection)
+        if not key:
+            return False, "Type a name for the basket, e.g. AIGA2.", None
+    else:
+        key = _text(selection)
+        valid = {o["value"] for o in funds_repo.options()}
+        if not key or key not in valid:
+            return False, "Pick a fund from the list.", None
+    if key in have:
+        return False, f"{key} is already a target.", None
+
+    hint = suggested(key) if kind != "basket" else {}
+    label = _text(label) or hint.get("label") or key
+    actual = _text(actual_fund_id) or hint.get("actual_fund_id")
+    order = db.query("SELECT COALESCE(MAX(sort_order), 0) + 1 AS n "
+                     "FROM etf_est_targets")["n"].iloc[0]
+    db.execute("""
+        INSERT INTO etf_est_targets
+            (target, label, kind, actual_fund_id, sort_order, active)
+        VALUES (?, ?, ?, ?, ?, 1)
+    """, (key, label, "basket" if kind == "basket" else "holdings", actual,
+          int(order)))
+    if kind == "basket":
+        return True, (f"Added {key}. Add its futures and weights below, then "
+                      "Save weights."), key
+    hold, _ = constituents(target(key))
+    return True, (f"Added {label}: {len(hold)} holdings on file."
+                  if not hold.empty else
+                  f"Added {label}, but it has no holdings on file yet."), key
+
+
+def save_basket(key: str, rows: list[dict]) -> tuple[int, str]:
+    """Replace a basket's components with ``rows`` (fund_id, weight). Symbols
+    are stored YF:-prefixed; blank rows and weights <= 0 are dropped.
+    Returns (rows written, message)."""
+    ensure_tables()
+    clean, seen = [], set()
+    for r in rows or []:
+        fid = yahoo_fund_id(r.get("fund_id"))
+        try:
+            w = float(r.get("weight"))
+        except (TypeError, ValueError):
+            w = 0.0
+        if not fid or w <= 0 or fid in seen:
+            continue
+        seen.add(fid)
+        clean.append((key, fid, w))
+    with db.get_conn() as conn:
+        conn.execute("DELETE FROM etf_est_basket WHERE target = ?", (key,))
+        conn.executemany("INSERT INTO etf_est_basket (target, fund_id, "
+                         "weight) VALUES (?, ?, ?)", clean)
+    total = sum(w for _, _, w in clean)
+    return len(clean), f"Saved {len(clean)} components, weights sum to " \
+                       f"{total:.2f}%."
+
+
+def _int(value, default: int) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default

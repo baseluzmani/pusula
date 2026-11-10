@@ -5,12 +5,15 @@ Rendered once above the tabs. Holds the chosen fund universe in a single
 store (``markets-universe``) so the selection persists as the user moves
 between Transactions, Compare, Heatmap and Momentum.
 
-Store shape:  {"mode": "holdings" | "all" | "type" | "select",
-               "picked": [fund_id, ...], "types": [asset_type, ...]}
+Store shape:  {"mode": "holdings" | "all" | "type" | "etf" | "select",
+               "picked": [fund_id, ...], "types": [asset_type, ...],
+               "etf": target}
 
 - mode "holdings": the resolved ids are open positions (portfolio_holdings)
 - mode "all":      every instrument with prices
 - mode "type":     every priced instrument of the asset types in "types"
+- mode "etf":      one ETF -> Day estimate target ("etf"): the fund's own
+                   price series plus every holding with an instruments row
 - mode "select":   exactly the ids in "picked" (checkbox dropdown)
 
 ``resolve_ids(store)`` turns the store into the concrete id list every tab
@@ -22,6 +25,7 @@ from dash import html, dcc, callback, Input, Output, State, ctx, no_update
 
 from core import theme
 from core.repo import market as repo
+from core.repo import fundest as est_repo
 
 
 STORE_ID = "markets-universe"
@@ -36,6 +40,8 @@ def resolve_ids(store: dict) -> list:
         return repo.all_instrument_ids()
     if mode == "type":
         return repo.ids_for_types(store.get("types"))
+    if mode == "etf":
+        return est_repo.member_ids(store["etf"]) if store.get("etf") else []
     if mode == "select":
         return list(store.get("picked") or [])
     if mode == "holdings":
@@ -50,7 +56,14 @@ def is_chosen(store) -> bool:
 
 def default_store() -> dict:
     """First-load state: no universe chosen, so no data is loaded."""
-    return {"mode": None, "picked": [], "types": []}
+    return {"mode": None, "picked": [], "types": [], "etf": None}
+
+
+def etf_target(store) -> str | None:
+    """The chosen ETF target when the universe is in "ETF" mode, else None.
+    Tabs that show weights (Transactions, the Heatmap's map) check this."""
+    store = store or {}
+    return store.get("etf") if store.get("mode") == "etf" else None
 
 
 def selector_bar():
@@ -69,6 +82,7 @@ def selector_bar():
                     {"label": "My holdings", "value": "holdings"},
                     {"label": "All instruments", "value": "all"},
                     {"label": "Asset type", "value": "type"},
+                    {"label": "ETF", "value": "etf"},
                     {"label": "Select\u2026", "value": "select"},
                 ],
                 value="holdings",
@@ -87,6 +101,14 @@ def selector_bar():
         html.Div(id="markets-types-wrap", style={"display": "none"}, children=[
             dcc.Dropdown(id="markets-types", multi=True, value=[], options=[],
                          placeholder="Choose asset types\u2026",
+                         style={"fontSize": "13px"}),
+        ]),
+
+        # ETF dropdown, only visible in "ETF" mode: the funds on ETF -> Day
+        # estimate (Data -> ETF targets adds more). One fund at a time.
+        html.Div(id="markets-etf-wrap", style={"display": "none"}, children=[
+            dcc.Dropdown(id="markets-etf", clearable=False, value=None,
+                         options=[], placeholder="Choose a fund\u2026",
                          style={"fontSize": "13px"}),
         ]),
 
@@ -116,6 +138,14 @@ def selector_bar():
                       "maxWidth": "460px"}),
         ]),
     ], style={"marginBottom": "16px"})
+
+
+def _date(value) -> str:
+    try:
+        import pandas as pd
+        return pd.Timestamp(value).strftime("%d %b %Y")
+    except (ValueError, TypeError):
+        return str(value)
 
 
 def _link_btn():
@@ -157,6 +187,27 @@ def _toggle_types(mode, options):
     if options:
         return style, no_update
     return style, [{"label": t, "value": t} for t in repo.asset_types()]
+
+
+# Show/hide the ETF dropdown. Options are re-read each time the mode is
+# chosen, so a target added on Data -> ETF targets appears without a reload;
+# the first fund is picked if nothing is.
+@callback(
+    Output("markets-etf-wrap", "style"),
+    Output("markets-etf", "options"),
+    Output("markets-etf", "value"),
+    Input("markets-mode", "value"),
+    State("markets-etf", "value"),
+)
+def _toggle_etf(mode, current):
+    if mode != "etf":
+        return {"display": "none"}, no_update, no_update
+    style = {"display": "block", "marginTop": "10px", "maxWidth": "460px"}
+    df = est_repo.targets()
+    options = [{"label": r.label, "value": r.target} for r in df.itertuples()]
+    keys = [o["value"] for o in options]
+    value = current if current in keys else (keys[0] if keys else None)
+    return style, options, value
 
 
 # Populate picker options the first time Select... is entered, defaulting to
@@ -210,9 +261,10 @@ def _fill_picker(mode, search, _all, _none, current, store):
     Input("markets-mode", "value"),
     Input("markets-picker", "value"),
     Input("markets-types", "value"),
+    Input("markets-etf", "value"),
     State("markets-picker", "options"),
 )
-def _write_store(mode, picked, types, options):
+def _write_store(mode, picked, types, etf, options):
     if mode is None:
         return default_store(), "Choose a universe to load data"
     if mode == "type":
@@ -221,6 +273,18 @@ def _write_store(mode, picked, types, options):
         store = {"mode": "type", "picked": [], "types": types}
         count = (f"{len(ids)} instruments" if types
                  else "Choose one or more asset types")
+        return store, count
+    if mode == "etf":
+        store = {"mode": "etf", "picked": [], "types": [], "etf": etf}
+        if not etf:
+            return store, "Choose a fund"
+        _, info = est_repo.members(etf)
+        if not info:
+            return store, "Fund not found"
+        count = (f"{info['holdings']} holdings \u00b7 {info['priced']} "
+                 f"priced")
+        if info.get("holdings_date"):
+            count += f" \u00b7 as of {_date(info['holdings_date'])}"
         return store, count
     if mode == "select":
         # picked holds only currently-visible ticks; merge with any ticked

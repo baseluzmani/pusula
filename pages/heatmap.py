@@ -14,6 +14,11 @@ sized by its value in GBP and coloured by its latest daily move (the 1D
 column; funds not yet priced today show their last move, dated on the tile).
 Group by type nests the tiles under their asset type. The sums are in
 core/daymove.py.
+
+In the "ETF" universe the map shows the fund's holdings instead, each tile
+sized by its weight in the fund and coloured by its own latest daily move in
+its own currency. No total is shown: the weights are for sizing only.
+Holdings with no price are left off the map (the note says how many).
 """
 
 import dash
@@ -26,6 +31,7 @@ from core import daymove as dm
 from core import finance as fin
 from core import valuation as val
 from core.repo import market as repo
+from core.repo import fundest as est_repo
 from core.repo import portfolio as pf
 from core.repo import settings
 from ui import universe
@@ -146,6 +152,9 @@ def _grid(store, sort_col, group, since):
 def _tree(store, group):
     if not universe.is_chosen(store):
         return None
+    etf = universe.etf_target(store)
+    if etf:
+        return _etf_tree(etf)
     ids = set(universe.resolve_ids(store))
     held = repo.open_positions()
     if not held.empty:
@@ -196,6 +205,103 @@ def _tree(store, group):
                       config={"displayModeBar": False},
                       style={"height": "460px"})
     return _tree_card(html.Div([head, graph, note]))
+
+
+def _etf_tree(key):
+    """The fund's holdings as tiles: size = weight in the fund, colour =
+    the holding's latest daily move."""
+    members, info = est_repo.members(key)
+    held = members[~members["is_fund"]] if not members.empty else members
+    priced = held[held["status"] == est_repo.STATUS_OK] if not held.empty \
+        else held
+    if priced.empty:
+        return _tree_card(_empty("No priced holdings to map."))
+
+    since = (pd.Timestamp.now().normalize()
+             - pd.Timedelta(days=MOVE_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    px = repo.prices(list(priced["fund_id"]), min_date=since)
+    moves = dm.latest_moves(px)
+    if moves.empty:
+        return _tree_card(_empty("No recent prices for these holdings."))
+    names = (px.drop_duplicates("fund_id", keep="last")
+               .set_index("fund_id")["fund_name"].to_dict())
+    tiles = priced.merge(moves, on="fund_id", how="inner")
+    tiles = tiles[tiles["weight_pct"] > 0]
+    if tiles.empty:
+        return _tree_card(_empty("No recent prices for these holdings."))
+    tiles["name"] = [names.get(f) or n for f, n in
+                     zip(tiles["fund_id"], tiles["name"])]
+    tiles["label"] = [dm.short_label(n, f) for n, f in
+                      zip(tiles["name"], tiles["fund_id"])]
+    tiles = tiles.sort_values("weight_pct", ascending=False)
+
+    left_off = len(held) - len(tiles)
+    head = html.Div([
+        html.Div("Latest day", style={**theme.CARD_TITLE,
+                                      "marginBottom": "0"}),
+        html.Div(f"{info['label']} \u00b7 {len(tiles)} holdings, "
+                 f"{tiles['weight_pct'].sum():.1f}% of the fund",
+                 style={"fontSize": "12px", "color": theme.SLATE}),
+    ], style={"display": "flex", "justifyContent": "space-between",
+              "alignItems": "baseline", "marginBottom": "8px"})
+    text = ("Tile size = weight in the fund \u00b7 colour = the holding's "
+            f"latest daily move in its own currency, full colour at "
+            f"\u00b1{TILE_CAP:g}% \u00b7 holdings not priced today show "
+            "their last move, dated on the tile")
+    if left_off > 0:
+        text += (f" \u00b7 {left_off} holding{'s' if left_off != 1 else ''}"
+                 " without a price left off")
+    note = html.Div(text, style={"fontSize": "10px", "color": theme.NEUTRAL,
+                                 "marginTop": "6px"})
+    graph = dcc.Graph(figure=_etf_tree_figure(tiles),
+                      config={"displayModeBar": False},
+                      style={"height": "460px"})
+    return _tree_card(html.Div([head, graph, note]))
+
+
+def _etf_tree_figure(tiles):
+    labels, values, colours, text, hover, sizes = [], [], [], [], [], []
+    share_max = float(tiles["weight_pct"].max()) or 1.0
+    for t in tiles.to_dict("records"):
+        when = (pd.Timestamp(t["move_date"]).strftime("%d %b")
+                if t["move_date"] is not None and pd.notna(t["move_date"])
+                else None)
+        size = round(10 + 12 * (t["weight_pct"] / share_max) ** 0.5)
+        line = f"<b>{t['label']}</b><br>{t['move']:+.2f}%"
+        if t["stale"]:
+            small = max(9, round(size * 0.7))
+            line += (f"<br><span style='font-size:{small}px'>"
+                     f"<i>{when or 'no move'}</i></span>")
+        day = (f"{t['move']:+.2f}% on {when}"
+               + (" (latest available)" if t["stale"] else "")
+               if when else f"no move in the last {dm.STALE_DAYS} days")
+        labels.append(t["label"])
+        values.append(float(t["weight_pct"]))
+        colours.append(theme.tile_rgb(t["move"], TILE_CAP))
+        text.append(line)
+        hover.append(f"<b>{t['name']}</b><br>{day}<br>"
+                     f"{t['weight_pct']:.2f}% of the fund")
+        sizes.append(size)
+
+    fig = go.Figure(go.Treemap(
+        ids=list(tiles["fund_id"]), labels=labels,
+        parents=[""] * len(labels), values=values,
+        branchvalues="total", sort=True,
+        marker=dict(colors=colours, line=dict(color=theme.SURFACE, width=2),
+                    pad=dict(t=0, l=2, r=2, b=2)),
+        text=text, texttemplate="%{text}", textposition="middle center",
+        textfont=dict(color="#FFFFFF", size=sizes, family=theme.FONT_UI),
+        customdata=hover,
+        hovertemplate="%{customdata}<extra></extra>",
+        pathbar=dict(visible=False),
+        tiling=dict(packing="squarify"),
+    ))
+    fig.update_layout(height=460, margin=dict(l=0, r=0, t=0, b=0),
+                      paper_bgcolor=theme.SURFACE,
+                      font=dict(family=theme.FONT_UI),
+                      hoverlabel=dict(font_size=12,
+                                      font_family=theme.FONT_UI))
+    return fig
 
 
 def _tree_card(child):

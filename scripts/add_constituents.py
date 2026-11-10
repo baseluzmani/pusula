@@ -61,6 +61,11 @@ Usage
         --link 0P0001EWE2=LU0466842654:USD
 
     --all-etfs        every ETF with holdings, not only the estimated ones
+    --target KEY      only this target (e.g. COMPOSITE:HSBC_EM); the
+                      Data -> ETF targets page runs it this way
+    --history         after --apply, fetch Yahoo history for the symbols
+                      added or activated, and for needed instruments that
+                      have no prices yet
     --min-weight 0.2  leave out holdings below this weight, percent
                       (default 0.1 - the long tail of an ETF adds rows to
                       every price import for almost no accuracy)
@@ -88,6 +93,7 @@ sys.path.insert(0, str(ROOT))
 import pandas as pd                                            # noqa: E402
 
 from core import config, db, fundest as fe, universe           # noqa: E402
+from core.background import FINISHED                           # noqa: E402
 from core.repo import etf as etf_repo                          # noqa: E402
 from core.repo import funds as funds_repo                      # noqa: E402
 from core.repo import fundest as est_repo                      # noqa: E402
@@ -114,12 +120,22 @@ TYPE_FOR = {"FUTURE": "Indicator", "ETF": "ETF", "INDEX": "Index",
 
 # --- What is needed ---------------------------------------------------------
 
-def _needed(all_etfs: bool, min_weight: float) -> tuple[pd.DataFrame,
-                                                         pd.DataFrame]:
+def _target_rows(only: str | None) -> list[dict]:
+    """Active targets, or just ``only`` (active or not)."""
+    if only:
+        row = est_repo.target(only)
+        if row is None:
+            raise SystemExit(f"--target: {only} is not in etf_est_targets")
+        return [row]
+    return est_repo.targets().to_dict("records")
+
+
+def _needed(all_etfs: bool, min_weight: float, only: str | None = None
+            ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(wanted, unmapped). wanted: fund_id, name, weight_pct, used_by.
     unmapped: holdings with no Yahoo symbol."""
     wanted, unmapped = [], []
-    for row in est_repo.targets().to_dict("records"):
+    for row in _target_rows(only):
         hold, _ = est_repo.constituents(row)
         for h in hold.itertuples():
             w = float(h.weight_pct or 0)
@@ -181,14 +197,14 @@ def _words(text) -> set:
             if len(w) >= 5 and w not in _COMMON}
 
 
-def _holdingless() -> list[dict]:
+def _holdingless(only: str | None = None) -> list[dict]:
     """Components of the estimated composites with no holdings to read, and
     pension funds whose names look like their underlying."""
     funds = funds_repo.list_funds()
     names = db.query("SELECT fund_id, name FROM instruments")
     name_of = dict(zip(names["fund_id"], names["name"]))
     out = []
-    for row in est_repo.targets().to_dict("records"):
+    for row in _target_rows(only):
         if not str(row["target"]).startswith("COMPOSITE:"):
             continue
         comp = universe.composite(row["target"]) or {}
@@ -303,6 +319,11 @@ def main(argv=None) -> int:
                     help="switch inactive instruments the estimate needs "
                          "back on")
     ap.add_argument("--all-etfs", action="store_true")
+    ap.add_argument("--target", default=None,
+                    help="only this etf_est_targets key")
+    ap.add_argument("--history", action="store_true",
+                    help="with --apply, fetch Yahoo history for what was "
+                         "added or activated")
     ap.add_argument("--min-weight", type=float, default=0.1,
                     help="leave out holdings below this weight, percent "
                          "(default 0.1; 0 for all)")
@@ -344,7 +365,9 @@ def main(argv=None) -> int:
             print("(Its holdings are added to the list below once the link "
                   "is written with --apply.)\n")
 
-    wanted, unmapped = _needed(args.all_etfs, args.min_weight)
+    if args.target and args.all_etfs:
+        raise SystemExit("--target and --all-etfs do not go together")
+    wanted, unmapped = _needed(args.all_etfs, args.min_weight, args.target)
     existing = _existing()
     have = set(existing["fund_id"])
     inactive = set(existing.loc[existing["active"] == 0, "fund_id"])
@@ -353,7 +376,8 @@ def main(argv=None) -> int:
         else wanted
     off = wanted[wanted["fund_id"].isin(inactive)] if not wanted.empty \
         else wanted
-    print(f"Needed by the Day estimate: {len(wanted)} symbols, "
+    print(f"Needed by {args.target or 'the Day estimate'}: "
+          f"{len(wanted)} symbols, "
           f"{len(wanted) - len(new)} already in instruments.")
 
     fx_style = {}
@@ -434,7 +458,8 @@ def main(argv=None) -> int:
         print(unmapped.to_string(index=False))
 
     linked = {f for f, _ in links}
-    gaps = [g for g in _holdingless() if g["component"] not in linked]
+    gaps = [g for g in _holdingless(args.target)
+            if g["component"] not in linked]
     if gaps:
         print(f"\nComposite components with no holdings ({len(gaps)}) - "
               "link each to its underlying fund with --link:")
@@ -448,6 +473,8 @@ def main(argv=None) -> int:
         return 0
     if add.empty and (off.empty or not args.activate):
         print("\nNothing else to write." if links else "\nNothing written.")
+        if args.history:
+            _history([], wanted)
         return 0
 
     if backup is None:
@@ -469,10 +496,55 @@ def main(argv=None) -> int:
     print(f"Added {len(add)} instrument(s)"
           + (f", activated {len(off)}" if args.activate and not off.empty
              else "") + ".")
+    if args.history:
+        fresh = list(add["source_id"]) if not add.empty else []
+        if args.activate and not off.empty:
+            fresh += [f[3:] for f in off["fund_id"]]
+        _history(fresh, wanted)
+        return 0
     print("\nNext:\n  .venv/bin/python -m importers.yahoo_prices\n"
           "  .venv/bin/python -m importers.live_prices")
     return 0
 
 
+def _history(fresh: list[str], wanted: pd.DataFrame) -> None:
+    """Yahoo history for ``fresh`` symbols plus any needed Yahoo instrument
+    that has no prices yet, so the new rows have returns at once instead of
+    after the nightly import."""
+    symbols = list(fresh)
+    if not wanted.empty:
+        ids = list(wanted["fund_id"])
+        marks = ",".join("?" * len(ids))
+        bare = db.query(f"""
+            SELECT i.source_id FROM instruments i
+            WHERE i.fund_id IN ({marks}) AND i.source = 'yahoo'
+              AND COALESCE(i.active, 1) = 1 AND i.source_id IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM prices p
+                              WHERE p.fund_id = i.fund_id)
+        """, tuple(ids))
+        symbols += list(bare["source_id"])
+    symbols = list(dict.fromkeys(s for s in symbols if s))
+    if not symbols:
+        print("\nHistory: nothing to fetch.")
+        return
+    print(f"\nFetching Yahoo history for {len(symbols)} symbol(s)...",
+          flush=True)
+    from importers import yahoo_prices
+    result = yahoo_prices.run(tickers=symbols)
+    print(f"History: {result.get('message', 'done')}", flush=True)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    # The last line is read by Data -> ETF targets to know the run is over.
+    code = 1
+    try:
+        code = main()
+    except SystemExit as exc:
+        if isinstance(exc.code, str):
+            print(exc.code, flush=True)
+        code = exc.code if isinstance(exc.code, int) else 1
+    except Exception:                                          # noqa: BLE001
+        import traceback
+        traceback.print_exc()
+    print(f"{FINISHED} {'ok' if not code else 'failed'}", flush=True)
+    sys.exit(code)
