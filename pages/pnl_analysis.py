@@ -25,6 +25,7 @@ from dash.dash_table.Format import Format, Group, Scheme, Symbol
 
 from core import finance as fin
 from core.repo import portfolio as repo
+from ui.help import help_icon
 from core import risk as risk_engine
 from core.roce import (
     MIN_DAYS_TO_ANNUALISE,
@@ -515,7 +516,10 @@ def _render_inner() -> html.Div:
                           children=f"as of {data['asof']:%d %b %Y}",
                           style={"marginLeft": "14px", "fontSize": "12px",
                                  "color": "#9ca3af"}),
-            ], style={"marginBottom": "12px"}),
+                html.Span(help_icon("portfolio.pnl-roci.table"),
+                          style={"marginLeft": "10px"}),
+            ], style={"marginBottom": "12px", "display": "flex",
+                      "alignItems": "center"}),
 
             html.Div(
                 f"FX note: {len(data['approx'])} non-GBP instruments are marked "
@@ -558,7 +562,8 @@ def _render_inner() -> html.Div:
             dcc.Graph(id=PREFIX + "exposure"),
 
             html.Details([
-                html.Summary("Validation",
+                html.Summary(["Validation ",
+                              help_icon("portfolio.pnl-roci.validation")],
                              style={"cursor": "pointer", "fontWeight": 600}),
                 html.Div(id=PREFIX + "validation",
                          style={"fontSize": "13px", "marginTop": "8px"}),

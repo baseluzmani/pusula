@@ -11,6 +11,7 @@ import dash
 from dash import Dash, html, dcc
 
 from core import config, theme
+from ui import help as help_ui
 
 app = Dash(
     __name__,
@@ -38,7 +39,9 @@ def compass_mark():
 
 
 def topbar():
-    ordered = sorted(dash.page_registry.values(),
+    # nav=False keeps a page (Help) out of the bar; it is reached from "?".
+    ordered = sorted((p for p in dash.page_registry.values()
+                      if p.get("nav", True)),
                      key=lambda p: p.get("order", 99))
     return html.Nav(
         [
@@ -49,6 +52,7 @@ def topbar():
                 for p in ordered
             ],
             html.Div(f"dev · {config.PORT}", className="env-tag"),
+            help_ui.topbar_button(),
         ],
         className="topbar",
     )
@@ -56,7 +60,8 @@ def topbar():
 
 def serve_layout():
     # A function, so the nav rebuilds if pages change during hot reload
-    return html.Div([dcc.Location(id="url"), topbar(), dash.page_container])
+    return html.Div([dcc.Location(id="url"), topbar(), dash.page_container,
+                     help_ui.drawer()])
 
 
 app.layout = serve_layout

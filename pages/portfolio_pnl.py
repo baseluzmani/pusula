@@ -24,13 +24,15 @@ import pandas as pd
 from core import theme, finance as fin
 from core.repo import portfolio as repo
 from core.roce import MIN_DAYS_TO_ANNUALISE, roce_map
+from ui.help import help_title
 
 def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Profit & Loss", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Profit & Loss", "portfolio.pnl.table",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Realised and unrealised P&L per holding, in GBP.",
                          style={"fontSize": "12px", "color": theme.SLATE,
                                 "marginTop": "2px"}),

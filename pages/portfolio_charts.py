@@ -26,6 +26,7 @@ import plotly.graph_objects as go
 
 from core import theme, finance as fin, valuation as val
 from core.repo import portfolio as repo
+from ui.help import help_title
 
 
 def _threshold():
@@ -84,8 +85,9 @@ def _date_picker(picker_id):
     ], style={"display": "flex", "alignItems": "center"})
 
 
-def _card_head(title, picker_id=None):
-    left = html.Div(title, style=theme.CARD_TITLE)
+def _card_head(title, picker_id=None, help_key=None):
+    left = (help_title(title, help_key) if help_key
+            else html.Div(title, style=theme.CARD_TITLE))
     if picker_id is None:
         return left
     return html.Div([left, _date_picker(picker_id)],
@@ -97,7 +99,7 @@ def _card_head(title, picker_id=None):
 def render():
     return html.Div([
         html.Div([
-            html.Div("Portfolio breakdown", style=theme.CARD_TITLE),
+            help_title("Portfolio breakdown", "portfolio.charts.breakdown"),
             html.Div("Inner ring: asset type. Outer ring: category within it. "
                      "Liabilities are netted against the assets they sit "
                      "against.",
@@ -115,12 +117,14 @@ def render():
         ], style={**theme.CARD, "marginBottom": "12px"}),
 
         html.Div([
-            _card_head("Net worth history", "pch-networth-from"),
+            _card_head("Net worth history", "pch-networth-from",
+                       "portfolio.charts.networth"),
             dcc.Graph(id="pch-networth", config={"displayModeBar": False}),
         ], style={**theme.CARD, "marginBottom": "12px"}),
 
         html.Div([
-            _card_head("Portfolio value by category", "pch-categories-from"),
+            _card_head("Portfolio value by category", "pch-categories-from",
+                       "portfolio.charts.by-category"),
             html.Div("Categories below "
                      f"{_threshold():.0%} of the latest total are grouped "
                      "as Other. Click a legend entry to hide it.",
@@ -130,7 +134,8 @@ def render():
         ], style={**theme.CARD, "marginBottom": "12px"}),
 
         html.Div([
-            _card_head("Composition", "pch-composition-from"),
+            _card_head("Composition", "pch-composition-from",
+                       "portfolio.charts.composition"),
             html.Div("Each category as a share of the total, property "
                      "excluded. Reads drift in the mix rather than growth - "
                      "a band can widen while its value falls.",

@@ -21,6 +21,7 @@ import pandas as pd
 
 from core import theme, finance as fin, valuation as val
 from core.repo import portfolio as repo
+from ui.help import help_title
 
 CURRENCY_SYMBOLS = {"GBP": "\u00A3", "USD": "$", "TRY": "\u20BA"}
 
@@ -60,7 +61,7 @@ def render():
         html.Div([
             # LEFT BOX (Main Table)
             html.Div([
-                html.Div("Holdings Detail", style=theme.CARD_TITLE),
+                help_title("Holdings Detail", "portfolio.portfolio.holdings-detail"),
                 html.Div(id="pf-holdings")
             ], style={
                 **theme.CARD, 
@@ -78,15 +79,15 @@ def render():
             # RIGHT BOX (Özet Paneller)
             html.Div([
                 html.Div([
-                    html.Div("By category", style=theme.CARD_TITLE),
+                    help_title("By category", "portfolio.portfolio.by-category"),
                     html.Div(id="pf-by-category"),
                 ], style={**theme.CARD, "marginBottom": "12px"}),
                 html.Div([
-                    html.Div("By asset type", style=theme.CARD_TITLE),
+                    help_title("By asset type", "portfolio.portfolio.by-asset-type"),
                     html.Div(id="pf-by-type"),
                 ], style=theme.CARD),
                 html.Div([
-                    html.Div("By account", style=theme.CARD_TITLE),
+                    help_title("By account", "portfolio.portfolio.by-account"),
                     html.Div(id="pf-by-account"),
                 ], style={**theme.CARD, "marginTop": "12px"}),
             ], style={"flex": "1 1 380px", # 380px'i ideal boyut yap ama esnemesine izin ver

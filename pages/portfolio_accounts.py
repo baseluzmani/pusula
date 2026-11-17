@@ -21,6 +21,7 @@ import pandas as pd
 
 from core import theme, finance as fin, valuation as val
 from core.repo import portfolio as repo
+from ui.help import help_title
 
 # Composite definitions and account mappings come from FTScrapper's config,
 # loaded by file path - a plain `import config` fails from Pusula.
@@ -38,8 +39,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Accounts", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Accounts", "portfolio.accounts",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Holdings and cash grouped by account.",
                          style={"fontSize": "12px", "color": theme.SLATE,
                                 "marginTop": "2px"}),

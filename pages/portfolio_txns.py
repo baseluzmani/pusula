@@ -40,6 +40,7 @@ import pandas as pd
 
 from core import theme, finance as fin
 from core.repo import portfolio as repo
+from ui.help import help_icon
 
 TYPE_COLOURS = {"BUY": "#2E6FB5", "SELL": theme.NEGATIVE,
                 "DIVIDEND": theme.POSITIVE}
@@ -97,8 +98,12 @@ def render():
 
         # Line count for the current filters, in the quiet caption style of
         # Data -> Instruments ("6 shown"). Empty when nothing matches.
-        html.Div(id="ptx-count", style={"fontSize": "11.5px",
-                 "color": theme.NEUTRAL, "margin": "0 0 6px 2px"}),
+        html.Div([
+            html.Div(id="ptx-count", style={"fontSize": "11.5px",
+                     "color": theme.NEUTRAL}),
+            help_icon("portfolio.transactions.table"),
+        ], style={"display": "flex", "alignItems": "center", "gap": "6px",
+                  "margin": "0 0 6px 2px"}),
 
         html.Div(html.Div(id="ptx-table"),
                  style={**theme.CARD, "padding": "0", "overflow": "auto",

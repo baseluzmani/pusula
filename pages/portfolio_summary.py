@@ -18,6 +18,7 @@ import pandas as pd
 
 from core import theme, finance as fin, valuation as val
 from core.repo import portfolio as repo
+from ui.help import help_title
 
 # Composite definitions come from FTScrapper's config, loaded by file path -
 # a plain `import config` fails because Pusula is not on that path.
@@ -29,8 +30,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Summary", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Summary", "portfolio.summary.table",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Holdings by value, with change since a snapshot.",
                          style={"fontSize": "12px", "color": theme.SLATE,
                                 "marginTop": "2px"}),

@@ -30,6 +30,7 @@ import pandas as pd
 from core import theme
 from core.repo import entry as repo
 from core.repo import standing, portfolio as pf
+from ui.help import help_title, help_icon
 
 TYPES = ("BUY", "SELL", "DIVIDEND")
 CURRENCIES = ("GBP", "USD", "TRY")
@@ -65,8 +66,12 @@ def render():
 def _transaction_form():
     return html.Div([
         html.Div([
-            html.Span(id="in-form-title", children="Add transaction",
-                      style=theme.CARD_TITLE),
+            html.Div([
+                html.Span(id="in-form-title", children="Add transaction",
+                          style={**theme.CARD_TITLE, "marginBottom": 0}),
+                help_icon("portfolio.inputs.form"),
+            ], style={"display": "flex", "alignItems": "center",
+                      "gap": "6px"}),
             html.Button("Cancel edit", id="in-cancel", n_clicks=0,
                         style={**_btn(), "display": "none"}),
         ], style={"display": "flex", "justifyContent": "space-between",
@@ -118,7 +123,7 @@ def _transaction_form():
 
 def _recent_panel():
     return html.Div([
-        html.Div("Recent transactions", style=theme.CARD_TITLE),
+        help_title("Recent transactions", "portfolio.inputs.recent"),
         html.Div("Click a row to edit it. Shows the latest 30, or up to 200 "
                  "once a filter is set.",
                  style={"fontSize": "11.5px", "color": theme.NEUTRAL,
@@ -149,7 +154,7 @@ def _recent_panel():
 
 def _cash_panel():
     return html.Div([
-        html.Div("Cash", style=theme.CARD_TITLE),
+        help_title("Cash", "portfolio.inputs.cash"),
         html.Div("Add a line, remove a line - no editing in place.",
                  style={"fontSize": "11.5px", "color": theme.NEUTRAL,
                         "marginBottom": "10px"}),
