@@ -95,6 +95,11 @@ def render():
         ], style={**theme.CARD, "display": "flex", "alignItems": "flex-end",
                   "flexWrap": "wrap", "gap": "14px", "marginBottom": "12px"}),
 
+        # Line count for the current filters, in the quiet caption style of
+        # Data -> Instruments ("6 shown"). Empty when nothing matches.
+        html.Div(id="ptx-count", style={"fontSize": "11.5px",
+                 "color": theme.NEUTRAL, "margin": "0 0 6px 2px"}),
+
         html.Div(html.Div(id="ptx-table"),
                  style={**theme.CARD, "padding": "0", "overflow": "auto",
                         "maxHeight": "calc(100vh - 250px)"}),
@@ -130,7 +135,7 @@ def _fund_options(accounts, vehicle, funds):
 
 
 @callback(
-    Output("ptx-table", "children"),
+    Output("ptx-table", "children"), Output("ptx-count", "children"),
     Input("ptx-fund", "value"), Input("ptx-from", "date"),
     Input("ptx-to", "date"), Input("ptx-type", "value"),
     Input("ptx-account", "value"), Input("ptx-vehicle", "value"),
@@ -140,7 +145,7 @@ def _table(funds, date_from, date_to, txn_type, accounts, vehicle):
                                       txn_type, accounts=accounts or None,
                                       vehicle=vehicle)
     if txns.empty:
-        return _msg("No transactions match these filters.")
+        return _msg("No transactions match these filters."), ""
 
     instruments = repo.instruments()
     prices = repo.latest_prices()
@@ -155,8 +160,11 @@ def _table(funds, date_from, date_to, txn_type, accounts, vehicle):
         rows.append(_row(t, instruments, price_map, gbpusd, rates, totals))
 
     rows.append(_totals_row(totals))
-    return html.Table([_header(), html.Tbody(rows)],
-                      style={"width": "100%", "borderCollapse": "collapse"})
+    n = len(txns)
+    count = f"{n:,} transaction{'' if n == 1 else 's'}"
+    return (html.Table([_header(), html.Tbody(rows)],
+                       style={"width": "100%", "borderCollapse": "collapse"}),
+            count)
 
 
 def _latest(fid, instruments, price_map, gbpusd, rates, punit, curr):
