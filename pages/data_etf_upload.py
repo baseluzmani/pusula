@@ -73,7 +73,7 @@ def render():
             dcc.Loading(html.Div(id="etf-upload-result",
                                  style={"marginTop": "14px"}),
                         type="default"),
-        ])),
+        ]), help_key="data.etf-upload.upload"),
 
         card("Or import what is already in the folder", html.Div([
             html.Div(str(config.IMPORT_DIR),
@@ -86,7 +86,7 @@ def render():
                                "background": theme.SURFACE,
                                "cursor": "pointer", "fontSize": "12.5px",
                                "fontWeight": 500, "color": theme.INK}),
-        ])),
+        ]), help_key="data.etf-upload.folder"),
 
         card(f"Recognised prefixes ({len(prefixes)})", html.Div([
             html.Div("A file whose prefix is not here is rejected rather than "

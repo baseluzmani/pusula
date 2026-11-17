@@ -44,7 +44,7 @@ def render():
     multi = {"fontSize": "12.5px"}
     return html.Div([
         header("Overview", "Spending by category and month. Click a category "
-               "to open its sub-categories."),
+               "to open its sub-categories.", help_key="spending.overview.table"),
         html.Div([
             bar(
                 field("Year", dcc.Dropdown(

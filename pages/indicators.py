@@ -35,6 +35,7 @@ from core.repo import macro as repo
 from core.repo import portfolio as pf
 from ui.figures import SEQUENCE, base_layout, empty
 from ui.layout import subtabs
+from ui.help import help_title
 
 dash.register_page(__name__, path="/indicators", name="Indicators", order=3)
 
@@ -159,15 +160,40 @@ NUM = {"fontFamily": theme.FONT_NUM, "fontVariantNumeric": "tabular-nums"}
 GRAPH = {"displayModeBar": False}
 
 
-def _head(title, note=None):
+def _head(title, note=None, help_key=None):
+    style = {**theme.CARD_TITLE, "marginBottom": "2px"}
     return html.Div([
-        html.Div(title, style={**theme.CARD_TITLE, "marginBottom": "2px"}),
+        help_title(title, help_key, style) if help_key
+        else html.Div(title, style=style),
         html.Div(note, style=NOTE) if note else None,
     ], style={"marginBottom": "10px"})
 
 
-def _card(title, note, *children):
-    return html.Div([_head(title, note), *children], style=CARD)
+# Card title -> its help entry (help/indicators.md), for the (i) icon.
+PANEL_HELP = {
+    "Treasury curve": "indicators.rates.treasury-curve",
+    "Gilt curve": "indicators.rates.gilt-curve",
+    "Recession spreads": "indicators.rates.recession-spreads",
+    "Real vs nominal": "indicators.rates.real-vs-nominal",
+    "Gilt real & breakeven": "indicators.rates.gilt-real",
+    "Curve shape": "indicators.rates.curve-shape",
+    "Curve evolution": "indicators.rates.curve-evolution",
+    "All series": "indicators.rates.all-series",
+    "VIX": "indicators.volatility.vix",
+    "VIX term structure": "indicators.volatility.vix-term",
+    "MOVE": "indicators.volatility.move",
+    "Fear & Greed": "indicators.volatility.fear-greed",
+    "Equity": "indicators.volatility.equity",
+    "Commodity signals": "indicators.commodity.signals",
+    "Copper / gold and the 10Y": "indicators.commodity.copper-gold",
+    "Miners vs gold": "indicators.commodity.miners-gold",
+    "Your themes": "indicators.commodity.themes",
+}
+
+
+def _card(title, note, *children, help_key=None):
+    key = help_key or PANEL_HELP.get(title)
+    return html.Div([_head(title, note, key), *children], style=CARD)
 
 
 def _row(*cards, min_width=360):

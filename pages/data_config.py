@@ -52,7 +52,7 @@ def render():
                 html.Button("Save settings", id="cfg-save", n_clicks=0,
                             style=BTN),
             ], style={"marginTop": "12px"}),
-        ])),
+        ]), help_key="data.config.settings"),
 
         card("Fixed in code", html.Div([
             html.Div("These describe where the machine keeps things. They are "
@@ -65,7 +65,7 @@ def render():
                 html.Div(f"SCRIPTS_DIR — {config.SCRIPTS_DIR}"),
                 html.Div(f"PORT — {config.PORT}"),
             ], style={"fontSize": "12.5px", "lineHeight": "1.8", **theme.NUM}),
-        ])),
+        ]), help_key="data.config.fixed"),
     ])
 
 

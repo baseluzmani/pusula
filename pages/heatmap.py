@@ -38,6 +38,7 @@ from core.repo import fundest as est_repo
 from core.repo import portfolio as pf
 from core.repo import settings
 from ui import universe
+from ui.help import help_title
 
 # Columns shown in the grid, in order.
 HEAT_COLS = ["1D", "1W", "1M", "3M", "6M", "YTD", "1Y", "Since"]
@@ -52,8 +53,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Heatmap", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Heatmap", "markets.heatmap.grid",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Returns across periods for the selected universe. "
                          "Green is up, red is down.",
                          style={"fontSize": "12px", "color": theme.SLATE,
@@ -214,8 +216,8 @@ def _tree(store, group):
 
     total = dm.summary(tiles)
     head = html.Div([
-        html.Div("Latest day", style={**theme.CARD_TITLE,
-                                      "marginBottom": "0"}),
+        help_title("Latest day", "markets.heatmap.latest-day",
+                   {**theme.CARD_TITLE, "marginBottom": "0"}),
         html.Div([
             html.Span(f"{total['move']:+.2f}%", style={
                 **theme.NUM, "fontWeight": 700,
@@ -270,8 +272,8 @@ def _etf_tree(key):
 
     left_off = len(held) - len(tiles)
     head = html.Div([
-        html.Div("Latest day", style={**theme.CARD_TITLE,
-                                      "marginBottom": "0"}),
+        help_title("Latest day", "markets.heatmap.latest-day",
+                   {**theme.CARD_TITLE, "marginBottom": "0"}),
         html.Div(f"{info['label']} \u00b7 {len(tiles)} holdings, "
                  f"{tiles['weight_pct'].sum():.1f}% of the fund",
                  style={"fontSize": "12px", "color": theme.SLATE}),

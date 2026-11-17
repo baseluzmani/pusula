@@ -272,7 +272,7 @@ def _run(as_of):
     options = [{"label": r["label"], "value": r["target"]} for r in results]
     store = {r["target"]: r for r in results}
     first = options[0]["value"] if options else None
-    return (card(f"Indicative moves - {as_of}", table, *notes), store,
+    return (card(f"Indicative moves - {as_of}", table, *notes, help_key="etf.day-estimate.moves"), store,
             options, first)
 
 
@@ -335,8 +335,9 @@ def _detail(target, store):
                    "marginBottom": "8px"})
 
     return html.Div([
-        card(f"{r['label']} - holdings", note, table),
-        card("Estimate against the fund's own price", _chart(r)),
+        card(f"{r['label']} - holdings", note, table,
+             help_key="etf.day-estimate.holdings"),
+        card("Estimate against the fund's own price", _chart(r), help_key="etf.day-estimate.chart"),
     ])
 
 

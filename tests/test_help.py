@@ -34,15 +34,30 @@ def _tab_labels(module: str) -> list[str]:
 
 
 def _icon_keys() -> set[str]:
+    """Every help key named in pages/ and ui/: help_title / help_icon
+    arguments, help_key=..., and lookup tables such as Indicators'
+    PANEL_HELP. A key is any string literal shaped like one."""
+    shape = re.compile(r"(%s)(\.[a-z0-9-]+){1,2}" % "|".join(content.SECTIONS))
     keys = set()
-    pat = re.compile(r'help_(?:title|icon)\(\s*(?:"[^"]*"\s*,\s*)?"([\w.-]+)"')
     for path in list((ROOT / "pages").glob("*.py")) + \
             list((ROOT / "ui").glob("*.py")):
-        keys |= set(pat.findall(path.read_text()))
-    # _card_head(title, picker, "key") in Charts
-    keys |= set(re.findall(r'"(portfolio\.charts\.[\w-]+)"',
-                           (ROOT / "pages/portfolio_charts.py").read_text()))
+        for node in ast.walk(ast.parse(path.read_text())):
+            if (isinstance(node, ast.Constant) and isinstance(node.value, str)
+                    and shape.fullmatch(node.value)):
+                keys.add(node.value)
     return keys
+
+
+def test_every_indicators_card_has_an_icon():
+    src = (ROOT / "pages" / "indicators.py").read_text()
+    titles = set(re.findall(r'_card\("([^"]+)"', src))
+    tree = ast.parse(src)
+    mapped = set()
+    for node in tree.body:
+        if (isinstance(node, ast.Assign)
+                and getattr(node.targets[0], "id", None) == "PANEL_HELP"):
+            mapped = {k.value for k in node.value.keys}
+    assert titles and titles <= mapped, titles - mapped
 
 
 def test_every_tab_has_help():
@@ -54,7 +69,7 @@ def test_every_tab_has_help():
 
 def test_every_icon_points_at_an_entry():
     keys = _icon_keys()
-    assert keys, "no help icons found"
+    assert len(keys) > 80, "help icons not found"
     missing = sorted(k for k in keys if content.get(k) is None)
     assert missing == []
 

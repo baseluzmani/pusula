@@ -98,7 +98,7 @@ def render():
                 html.Button("Add", id="cmp-add", n_clicks=0, style=BTN),
             ], style={"marginTop": "18px", "paddingTop": "16px",
                       "borderTop": f"1px solid {theme.LINE}"}),
-        ])),
+        ]), help_key="data.composites.composites"),
 
         html.Div(id="cmp-components"),
     ])

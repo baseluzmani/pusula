@@ -146,7 +146,7 @@ def render():
                      **TABLE),
              ], id=f"{P}-pv", style={"display": "none", "marginTop": "14px",
                                      "paddingTop": "14px",
-                                     "borderTop": f"1px solid {theme.LINE}"})),
+                                     "borderTop": f"1px solid {theme.LINE}"}), help_key="spending.rules.keyword-rules"),
 
         card("Categories",
              bar(field("Category", dcc.Dropdown(
@@ -167,7 +167,7 @@ def render():
                  html.Button("Add sub-category", id=f"{P}-sadd", n_clicks=0,
                              style=btn())),
              html.Div(id=f"{P}-cmsg", style={"marginTop": "8px",
-                                             "minHeight": "16px"})),
+                                             "minHeight": "16px"}), help_key="spending.rules.categories"),
 
         card("Re-map transactions",
              bar(field("From category", dcc.Dropdown(
@@ -191,7 +191,7 @@ def render():
                  html.Button("Re-map", id=f"{P}-mgo", n_clicks=0,
                              style=btn("primary"))),
              html.Div(id=f"{P}-mmsg", style={**NOTE, "marginTop": "8px",
-                                             "minHeight": "16px"})),
+                                             "minHeight": "16px"}), help_key="spending.rules.remap"),
 
         card("Split templates",
              html.Div(dash_table.DataTable(
@@ -209,7 +209,7 @@ def render():
                            "Statements or the Manual Queue.", style=NOTE),
                  style={"alignItems": "center"}),
              html.Div(id=f"{P}-tmsg", style={"marginTop": "8px",
-                                             "minHeight": "16px"})),
+                                             "minHeight": "16px"}), help_key="spending.rules.templates"),
 
         card("Cards",
              html.Div(dash_table.DataTable(
@@ -242,7 +242,7 @@ def render():
                  html.Button("Add card", id=f"{P}-addcard", n_clicks=0,
                              style=btn())),
              html.Div(id=f"{P}-kmsg", style={"marginTop": "8px",
-                                             "minHeight": "16px"})),
+                                             "minHeight": "16px"}), help_key="spending.rules.cards"),
 
         dcc.Store(id=f"{P}-refresh", data=0),
         dcc.Store(id=f"{P}-pv-refresh", data=0),

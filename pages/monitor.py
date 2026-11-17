@@ -35,6 +35,7 @@ from core.repo import market as repo
 from core.repo import settings
 from core.repo import targets as tg
 from ui import universe
+from ui.help import help_title, help_icon
 
 # (key, default, type, description) - created on first open if missing.
 SETTINGS = [
@@ -110,8 +111,9 @@ def render():
 
     return html.Div([
         html.Div([
-            html.Div("Monitor", style={"fontSize": "17px", "fontWeight": 700,
-                                       "color": theme.INK}),
+            help_title("Monitor", "markets.monitor.table",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
             html.Div("Distance from the 52-week high, the 200-day average and "
                      "your own levels. Click a row for its chart and to set "
                      "levels.",
@@ -130,7 +132,12 @@ def render():
         # the layout (hidden until a row is clicked) so the form callbacks
         # always have their components.
         html.Div(id="mon-detail", style={"display": "none"}, children=[
-            html.Div(id="mon-detail-title", style=theme.CARD_TITLE),
+            html.Div([
+                html.Div(id="mon-detail-title",
+                         style={**theme.CARD_TITLE, "marginBottom": 0}),
+                help_icon("markets.monitor.detail"),
+            ], style={"display": "flex", "alignItems": "center",
+                      "gap": "6px", "marginBottom": "12px"}),
             dcc.Graph(id="mon-chart", config={"displayModeBar": False},
                       style={"height": "360px"}),
             html.Div(id="mon-phase-note"),

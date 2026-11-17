@@ -87,10 +87,16 @@ def bar(*children, **style):
         "alignItems": "flex-end", **style})
 
 
-def header(title: str, subtitle: str):
+def header(title: str, subtitle: str, help_key: str | None = None):
+    """Tab heading. help_key adds the (i) icon for that help entry."""
+    big = {"fontSize": "17px", "fontWeight": 700, "color": theme.INK}
+    if help_key:
+        from ui.help import help_title
+        head = help_title(title, help_key, big)
+    else:
+        head = html.Div(title, style=big)
     return html.Div([
-        html.Div(title, style={"fontSize": "17px", "fontWeight": 700,
-                               "color": theme.INK}),
+        head,
         html.Div(subtitle, style={"fontSize": "12px", "color": theme.SLATE,
                                   "marginTop": "2px"}),
     ], style={"marginBottom": "14px"})

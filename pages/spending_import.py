@@ -60,6 +60,7 @@ from dash import (html, dcc, dash_table, callback, Input, Output, State, ctx,
 from core import theme, spending as sp, statements
 from core.repo import settings
 from core.repo import spending as repo
+from ui.help import help_title
 from ui.spend import (TABLE, money_cells, money_col, btn, field, bar, header,
                       message, gbp, assign_bar, register_subcategories,
                       select_rows, remember_rule, INPUT, NOTE)
@@ -112,8 +113,8 @@ def render():
         header("Import", "Upload statements (HSBC UK credit card or current "
                "account, HSBC Türkiye) or CSV exports - any file name, "
                "several at once. Statements are matched line by line with "
-               "what is stored."),
-        html.Div([html.Div("Cards", style=theme.CARD_TITLE),
+               "what is stored.", help_key="spending.import.preview"),
+        html.Div([help_title("Cards", "spending.import.cards"),
                   html.Div(id=f"{P}-coverage")], style=theme.CARD),
         html.Div([
             bar(

@@ -30,6 +30,7 @@ from core import theme, config
 from core.repo import market as repo
 from core.repo import settings
 from ui import universe
+from ui.help import help_title
 
 RETURN_COLS = ["1D", "1W", "1M", "3M", "YTD", "Since"]
 
@@ -40,8 +41,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Transactions", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Transactions", "markets.transactions.returns-table",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Click an instrument to see its price with buys and "
                          "sells, and its monthly returns.",
                          style={"fontSize": "12px", "color": theme.SLATE,
@@ -61,7 +63,7 @@ def render():
             html.Div([
                 html.Div([
                     html.Div([
-                        html.Span("Price", style=theme.CARD_TITLE),
+                        help_title("Price", "markets.transactions.price"),
                         html.Span(id="tx-chart-info", style={"fontSize": "11px",
                                   "color": theme.NEUTRAL, "marginLeft": "8px"}),
                     ], style={"display": "flex", "alignItems": "baseline",
@@ -78,7 +80,7 @@ def render():
                 ], style={**theme.CARD, "marginBottom": "12px"}),
 
                 html.Div([
-                    html.Span("Monthly returns", style=theme.CARD_TITLE),
+                    help_title("Monthly returns", "markets.transactions.monthly"),
                     dcc.Graph(id="tx-monthly", config={"displayModeBar": False},
                               style={"height": "340px"}),
                 ], style=theme.CARD),

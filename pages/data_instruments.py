@@ -24,6 +24,7 @@ from dash import (html, dcc, dash_table, callback, Input, Output, State,
 
 from core import theme
 from core.repo import standing as repo
+from ui.help import help_title
 
 COLUMNS = [
     {"name": "Fund ID", "id": "fund_id", "editable": False},
@@ -58,8 +59,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Instruments", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Instruments", "data.instruments.table",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Currency and price unit drive every GBP conversion. "
                          "Rows missing either are highlighted.",
                          style={"fontSize": "12px", "color": theme.SLATE,

@@ -20,6 +20,7 @@ from dash import html, dcc, dash_table, callback, Input, Output, State, no_updat
 
 from core import theme
 from core.repo import standing as repo
+from ui.help import help_title
 
 COLUMNS = [
     {"name": "Name", "id": "name", "editable": True},
@@ -35,8 +36,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Accounts", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Accounts", "data.accounts.table",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Edit cells directly, then Save. Active 0 hides an "
                          "account from the transaction form without losing "
                          "its history.",

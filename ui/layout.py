@@ -15,11 +15,15 @@ def page_header(title: str, subtitle: str = ""):
     )
 
 
-def card(title: str, *children):
-    return html.Div(
-        [html.Div(title, style=theme.CARD_TITLE), *children],
-        style=theme.CARD,
-    )
+def card(title: str, *children, help_key: str | None = None):
+    """A card with a title. help_key adds the (i) icon for that help entry
+    (help/*.md, see core/help.py)."""
+    if help_key:
+        from ui.help import help_title
+        head = help_title(title, help_key)
+    else:
+        head = html.Div(title, style=theme.CARD_TITLE)
+    return html.Div([head, *children], style=theme.CARD)
 
 
 def subtabs(tab_id: str, labels: list[str], value: str | None = None):

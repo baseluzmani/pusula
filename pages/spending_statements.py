@@ -28,6 +28,7 @@ from dash import (html, dcc, dash_table, callback, Input, Output, State, ctx,
 
 from core import theme, spending as sp
 from core.repo import spending as repo
+from ui.help import help_title
 from ui.spend import (TABLE, money_cells, money_col, btn, field, bar, header,
                       message, gbp, assign_bar, register_subcategories,
                       split_panel, register_split, remember_rule, NOTE)
@@ -80,7 +81,7 @@ def render():
     return html.Div([
         header("Statements", "What each uploaded statement covers and whether "
                "the stored lines reconcile to it. Click one to see its "
-               "lines."),
+               "lines.", help_key="spending.statements.table"),
         html.Div([
             bar(
                 field("Card", dcc.Dropdown(
@@ -97,7 +98,7 @@ def render():
             ),
             html.Div(id=f"{P}-info", style={**NOTE, "marginTop": "10px"}),
         ], style=theme.CARD),
-        html.Div([html.Div("Coverage", style=theme.CARD_TITLE),
+        html.Div([help_title("Coverage", "spending.statements.coverage"),
                   html.Div(id=f"{P}-grid")], style=theme.CARD),
         html.Div([
             dash_table.DataTable(
@@ -340,7 +341,7 @@ def _cats(rows: pd.DataFrame):
                                                     "fontWeight": 700}),
                          html.Td(gbp(total), style={**num, "fontWeight": 700}),
                          html.Td("")]))
-    return html.Div([html.Div("Spending by category", style=theme.CARD_TITLE),
+    return html.Div([help_title("Spending by category", "spending.statements.by-category"),
                      html.Table(html.Tbody(body))])
 
 

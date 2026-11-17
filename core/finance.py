@@ -154,9 +154,13 @@ def position_pnl(txns: pd.DataFrame, current_price_gbp) -> dict:
         commission (absent -> treated as 0).
     current_price_gbp: latest price in GBP pounds, or None if unpriceable.
 
-    Weighted-average-cost method, matching legacy calc_pnl:
+    Weighted-average-cost method:
       - BUY adds qty and cost (cost includes commission).
-      - DIVIDEND reduces cost basis (floored at 0) and accrues separately.
+      - DIVIDEND is counted once, as income: it accrues to `dividends` and
+        leaves the cost basis alone. (The legacy calc_pnl also took it off
+        the cost basis, which raised unrealised P&L by the same amount, so
+        every dividend was counted twice. Fixed Nov 2026; core.roce books
+        dividends the same single way, so P&L and P&L ROCI now agree.)
       - SELL realises against running average cost; sell commission reduces
         the realised gain.
 
@@ -181,9 +185,7 @@ def position_pnl(txns: pd.DataFrame, current_price_gbp) -> dict:
             total_qty += qty
             total_cost += qty * cost_per_unit + comm      # commission raises cost
         elif ttype == "DIVIDEND":
-            div_gbp = txn_price_to_gbp(qty, r.currency, r.fx_rate, "pound")
-            total_cost = max(total_cost - div_gbp, 0)
-            dividends += div_gbp
+            dividends += txn_price_to_gbp(qty, r.currency, r.fx_rate, "pound")
         elif ttype == "SELL":
             if total_qty > 0:
                 avg = total_cost / total_qty

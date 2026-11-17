@@ -25,6 +25,7 @@ import pandas as pd
 
 from core import db, theme, valuation as val
 from core.repo import tickers as ticker_repo
+from ui.help import help_title
 from importers import backfill
 
 
@@ -37,8 +38,9 @@ def render():
     today = date.today()
     return html.Div([
         html.Div([
-            html.Div("Backfill prices", style={"fontSize": "17px",
-                     "fontWeight": 700, "color": theme.INK}),
+            help_title("Backfill prices", "data.backfill",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
             html.Div("Fetch a date range from Yahoo. Dates already held are "
                      "skipped, so re-running a range is safe.",
                      style={"fontSize": "12px", "color": theme.SLATE,
@@ -83,7 +85,7 @@ def render():
         dcc.Loading(html.Div(id="bf-result"), type="default"),
 
         html.Div([
-            html.Div("Where the gaps are", style=theme.CARD_TITLE),
+            help_title("Where the gaps are", "data.backfill.gaps"),
             html.Div("Tracked tickers whose latest price is not recent. "
                      "A market holiday explains a day or two; weeks means "
                      "something is wrong.",

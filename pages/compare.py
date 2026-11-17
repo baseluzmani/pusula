@@ -23,6 +23,7 @@ from core import theme, config
 from core.repo import market as repo
 from core.repo import settings
 from ui import universe
+from ui.help import help_title
 
 RETURN_COLS = ["1D", "1W", "1M", "3M", "6M", "YTD", "1Y", "Since"]
 LINE_COLOURS = ["#2E6FB5", "#B8860F", "#1A7A4C", "#C0392B", "#7D5BA6",
@@ -34,8 +35,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Compare", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Compare", "markets.compare.returns-table",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Rebased returns from the Since date. Tick rows to "
                          "add or remove lines.",
                          style={"fontSize": "12px", "color": theme.SLATE,
@@ -54,7 +56,7 @@ def render():
         html.Div([
             html.Div([
                 html.Div([
-                    html.Span("Rebased returns", style=theme.CARD_TITLE),
+                    help_title("Rebased returns", "markets.compare.chart"),
                     html.Span(id="cmp-info", style={"fontSize": "11px",
                               "color": theme.NEUTRAL, "marginLeft": "8px"}),
                 ], style={"display": "flex", "alignItems": "baseline"}),
@@ -384,8 +386,8 @@ def _selected_table(selected, since):
             "borderBottom": f"1px solid {theme.LINE}"}))
 
     return html.Div([
-        html.Div("Returns of plotted lines", style={**theme.CARD_TITLE,
-                 "marginBottom": "6px"}),
+        help_title("Returns of plotted lines", "markets.compare.plotted",
+                   {**theme.CARD_TITLE, "marginBottom": "6px"}),
         html.Table([head, html.Tbody(body)],
                    style={"width": "100%", "borderCollapse": "collapse"}),
     ], style={"marginTop": "10px"})

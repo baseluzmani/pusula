@@ -86,7 +86,7 @@ def render():
                      "as a positive number - the sign comes from the units.",
                      style={"color": theme.SLATE, "fontSize": "12px",
                             "marginTop": "10px"}),
-        ])),
+        ]), help_key="data.manual-prices.holdings"),
 
         card("Record a value", html.Div([
             html.Div([
@@ -114,7 +114,7 @@ def render():
                      "its own window.",
                      style={"color": theme.SLATE, "fontSize": "12px",
                             "marginTop": "10px"}),
-        ])),
+        ]), help_key="data.manual-prices.record"),
 
         html.Div(id="mp-history"),
     ])
@@ -125,7 +125,7 @@ def _history(fund_id):
     if df.empty:
         return card("History", html.Div(
             "No entries yet.",
-            style={"color": theme.SLATE, "fontSize": "13px"}))
+            style={"color": theme.SLATE, "fontSize": "13px"}), help_key="data.manual-prices.history")
 
     rows = []
     for r in df.to_dict("records"):
@@ -154,7 +154,7 @@ def _history(fund_id):
                  "entries. Use it if the series and the entries disagree.",
                  style={"color": theme.SLATE, "fontSize": "12px",
                         "marginTop": "8px"}),
-    ]))
+    ]), help_key="data.manual-prices.history")
 
 
 def _flash(text, ok=True):

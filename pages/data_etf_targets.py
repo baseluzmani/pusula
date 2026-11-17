@@ -35,6 +35,7 @@ from dash.dash_table.Format import Format, Scheme, Symbol
 
 from core import background, theme
 from core.repo import fundest as repo
+from ui.help import help_title
 
 JOB = "add_constituents"
 
@@ -122,8 +123,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("ETF targets", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("ETF targets", "data.etf-targets.table",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("The funds on ETF → Day estimate and Markets "
                          "→ Universe → ETF. Edit in the grid and "
                          "Save; Active 0 hides a fund. Click a row to see "
@@ -278,8 +280,8 @@ def render():
                         "whiteSpace": "pre-wrap"}),
                 ]),
 
-                html.Div("Holdings", style={**theme.CARD_TITLE,
-                                            "marginTop": "14px"}),
+                help_title("Holdings", "data.etf-targets.holdings",
+                           {**theme.CARD_TITLE, "marginTop": "14px"}),
                 dash_table.DataTable(
                     id="etft-holdings", columns=HOLDING_COLS, data=[],
                     sort_action="native", page_action="none",

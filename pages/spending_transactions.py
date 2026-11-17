@@ -56,7 +56,7 @@ def render():
     return html.Div([
         header("Transactions", "Every stored bank line. Tick rows to change "
                "their category, add a note, split one, or send them back to "
-               "the Manual Queue."),
+               "the Manual Queue.", help_key="spending.transactions.table"),
         html.Div([
             bar(
                 field("From", dcc.DatePickerSingle(

@@ -8,6 +8,7 @@ from core.repo import etf as repo
 from core.repo import funds as funds_repo
 from ui import figures
 from ui.layout import subtabs, card, placeholder
+from ui.help import help_title
 from pages import etf_estimate
 
 dash.register_page(__name__, path="/etf", name="ETF", order=4)
@@ -73,11 +74,11 @@ def _holdings_view():
                   "marginBottom": "18px", "flexWrap": "wrap"}),
 
         html.Div(id="etf-h-stats", style={"marginBottom": "18px"}),
-        card("Portfolio composition", html.Div(id="etf-h-table")),
+        card("Portfolio composition", html.Div(id="etf-h-table"), help_key="etf.holdings.composition"),
         card(f"Weight trend - top {TREND_TOP_N} holdings",
-             dcc.Graph(id="etf-h-heatmap", config={"displayModeBar": False})),
+             dcc.Graph(id="etf-h-heatmap", config={"displayModeBar": False}), help_key="etf.holdings.weight-heatmap"),
         card("Weight trend - line",
-             dcc.Graph(id="etf-h-line", config={"displayModeBar": False})),
+             dcc.Graph(id="etf-h-line", config={"displayModeBar": False}), help_key="etf.holdings.weight-line"),
     ])
 
 
@@ -259,8 +260,14 @@ def _change_section(title, df, accent, show_delta):
         body = html.Div(html.Table([head, html.Tbody(rows)], className="pz"),
                         style={"overflowX": "auto"})
 
+    key = {"New positions": "etf.changes.new",
+           "Removed positions": "etf.changes.removed",
+           "Increased": "etf.changes.increased",
+           "Decreased": "etf.changes.decreased"}.get(title)
     return html.Div([
-        html.Div(f"{title} ({n})", style={**theme.CARD_TITLE, "color": accent}),
+        help_title(f"{title} ({n})", key, {**theme.CARD_TITLE, "color": accent})
+        if key else html.Div(f"{title} ({n})",
+                             style={**theme.CARD_TITLE, "color": accent}),
         body,
     ], style={**theme.CARD, "borderLeft": f"3px solid {accent}", "borderRadius": "0 6px 6px 0"})
 
@@ -406,19 +413,19 @@ def _compare(etf_a, etf_b):
     half = {"flex": "1", "minWidth": "320px"}
     top10 = html.Div([
         html.Div(card(f"Top 10 - {na} ({c['top10_weight_a']:.1f}% of fund)",
-                      _simple_table(c["top10_a"], "weight_pct", "#2E75B6", True)),
+                      _simple_table(c["top10_a"], "weight_pct", "#2E75B6", True), help_key="etf.compare.top10"),
                  style=half),
         html.Div(card(f"Top 10 - {nb} ({c['top10_weight_b']:.1f}% of fund)",
-                      _simple_table(c["top10_b"], "weight_pct", theme.NEEDLE, True)),
+                      _simple_table(c["top10_b"], "weight_pct", theme.NEEDLE, True), help_key="etf.compare.top10"),
                  style=half),
     ], style={"display": "flex", "gap": "14px", "flexWrap": "wrap"})
 
     only = html.Div([
         html.Div(card(f"Only in {na} ({len(c['only_a'])})",
-                      _simple_table(c["only_a"], "weight_a", "#2E75B6")),
+                      _simple_table(c["only_a"], "weight_a", "#2E75B6"), help_key="etf.compare.only"),
                  style=half),
         html.Div(card(f"Only in {nb} ({len(c['only_b'])})",
-                      _simple_table(c["only_b"], "weight_b", theme.NEEDLE)),
+                      _simple_table(c["only_b"], "weight_b", theme.NEEDLE), help_key="etf.compare.only"),
                  style=half),
     ], style={"display": "flex", "gap": "14px", "flexWrap": "wrap"})
 
@@ -445,10 +452,10 @@ def _compare(etf_a, etf_b):
                         "marginBottom": "14px"}),
         stats,
         top10,
-        card("Common holdings", _common_table(c["common"], na, nb)),
+        card("Common holdings", _common_table(c["common"], na, nb), help_key="etf.compare.common"),
         only,
         card(f"Overlap heatmap - top {COMPARE_HEATMAP_N} common holdings",
-             dcc.Graph(figure=heat, config={"displayModeBar": False})),
+             dcc.Graph(figure=heat, config={"displayModeBar": False}), help_key="etf.compare.overlap-heatmap"),
     ])
 
 
@@ -513,6 +520,7 @@ def _fc_side(df, name, date, as_of, accent):
         ], style={"fontSize": "11.5px", "color": theme.SLATE,
                   "marginBottom": "10px", **theme.NUM}),
         _fc_table(df, accent),
+        help_key="etf.fund-compare.sides",
     )
 
 
@@ -577,8 +585,8 @@ def _map_view():
 
         html.Div(id="etf-m-feedback", style={"marginBottom": "10px"}),
         html.Div(id="etf-m-edit", style={"marginBottom": "14px"}),
-        card("Identifier records", html.Div(id="etf-m-table")),
-        card("Unmapped fund holdings", html.Div(id="etf-m-unmapped")),
+        card("Identifier records", html.Div(id="etf-m-table"), help_key="etf.ticker-map.records"),
+        card("Unmapped fund holdings", html.Div(id="etf-m-unmapped"), help_key="etf.ticker-map.unmapped"),
 
         dcc.Store(id="etf-m-selected", data=None),
         dcc.Store(id="etf-m-figis", data=[]),
@@ -766,7 +774,7 @@ def _edit_panel(figi, _refresh):
     ], style={"fontSize": "11.5px", "color": theme.SLATE, "marginBottom": "12px"})
 
     return html.Div([
-        html.Div("Edit mapping", style=theme.CARD_TITLE),
+        help_title("Edit mapping", "etf.ticker-map.edit"),
         meta,
         html.Div([
             field("FIGI", "etf-m-f-figi",
@@ -838,7 +846,7 @@ def _map_actions(save_n, empty_n, selected, refresh,
 def _sources_view():
     return html.Div([
         html.Div(id="etf-s-feedback", style={"marginBottom": "10px"}),
-        card("Holdings file sources", html.Div(id="etf-s-table")),
+        card("Holdings file sources", html.Div(id="etf-s-table"), help_key="etf.sources.sources"),
         dcc.Store(id="etf-s-refresh", data=0),
     ])
 

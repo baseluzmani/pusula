@@ -247,7 +247,7 @@ def _limits_card():
                  "are in Data → Config.",
                  style={"color": theme.SLATE, "fontSize": "12px",
                         "marginTop": "10px"}),
-    ]))
+    ]), help_key="spending.allowances.limits")
 
 
 # --- Page ----------------------------------------------------------------
@@ -264,7 +264,8 @@ def render():
     for person, meta in PEOPLE.items():
         blocks.append(html.Div([
             card(f"{meta['label']} — inputs",
-                 _input_table(person, data, years, current, meta["car"])),
+                 _input_table(person, data, years, current, meta["car"]),
+                 help_key="spending.allowances.inputs"),
             html.Div(id=f"alw-results-{person}"),
             html.Div(id=f"alw-isa-{person}"),
         ]))
@@ -323,13 +324,15 @@ def recalc(data):
     for person, meta in PEOPLE.items():
         res = calc.carry_forward(data, person, years, limits, rates, p11d)
         out.append(card(f"{meta['label']} — pension allowance & carry forward",
-                        _results_table(res, years, current)))
+                        _results_table(res, years, current),
+                        help_key="spending.allowances.pension"))
         out.append(card(f"{meta['label']} — ISA",
-                        _isa_table(res, years, current, isa_limit)))
+                        _isa_table(res, years, current, isa_limit),
+                        help_key="spending.allowances.isa"))
 
     jisa = card("Atlas — JISA",
                 _jisa_table(data.get("atlas", {}), jyears, current,
-                            jisa_limit))
+                            jisa_limit), help_key="spending.allowances.jisa")
     return out[0], out[1], out[2], out[3], jisa
 
 

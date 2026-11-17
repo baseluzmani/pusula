@@ -41,6 +41,7 @@ from core.repo import market as repo
 from core.repo import portfolio as pf
 from core.repo import settings
 from ui import universe
+from ui.help import help_title
 
 NONE = "NONE"           # benchmark dropdown value meaning "no benchmark"
 MAX_TRAILS = 12         # "All trails" only up to this many dots
@@ -111,8 +112,9 @@ def render():
     return html.Div([
         html.Div([
             html.Div([
-                html.Div("Momentum", style={"fontSize": "17px",
-                         "fontWeight": 700, "color": theme.INK}),
+                help_title("Momentum", "markets.momentum.map",
+                           {"fontSize": "17px", "fontWeight": 700,
+                            "color": theme.INK}),
                 html.Div("Trend against recent move, each in its own "
                          "volatility. Hollow dots have short history.",
                          style={"fontSize": "12px", "color": theme.SLATE,

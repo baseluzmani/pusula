@@ -86,7 +86,7 @@ def _importers_view():
     rows = [_importer_row(i, last.get(i.id, {})) for i in registry.REGISTRY]
     return html.Div([
         html.Div(id="dt-run-result"),
-        card("Importers", html.Div(rows)),
+        card("Importers", html.Div(rows), help_key="data.importers.list"),
     ])
 
 
@@ -112,9 +112,9 @@ def _database_view():
             html.Div("Development copy — the live dashboards use their own file.",
                      style={"color": theme.SLATE, "fontSize": "12px",
                             "marginTop": "4px"}),
-        ])),
+        ]), help_key="data.database.connection"),
         card(f"Tables ({len(tables)})",
-             data_table(tables, numeric_cols=["Rows", "Indexes"])),
+             data_table(tables, numeric_cols=["Rows", "Indexes"]), help_key="data.database.tables"),
     ])
 
 
@@ -145,10 +145,10 @@ def render(tab):
         if hist.empty:
             return card("Run history", html.Div(
                 "No importer has run yet.",
-                style={"color": theme.SLATE, "fontSize": "13px"}))
+                style={"color": theme.SLATE, "fontSize": "13px"}), help_key="data.run-history.runs")
         hist.columns = ["Importer", "Started", "Status", "Rows", "Message"]
         return card("Recent runs",
-                    data_table(hist, numeric_cols=["Started", "Rows"]))
+                    data_table(hist, numeric_cols=["Started", "Rows"]), help_key="data.run-history.runs")
     return _database_view()
 
 

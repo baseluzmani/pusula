@@ -32,6 +32,7 @@ from dash import (html, dcc, dash_table, callback, Input, Output, State, ctx,
 from core import theme, spending as sp
 from core.repo import settings
 from core.repo import spending as repo
+from ui.help import help_title
 from ui.spend import (TABLE, money_cells, money_col, btn, field, bar, header,
                       message, gbp, assign_bar, register_subcategories,
                       select_rows, split_panel, register_split, remember_rule,
@@ -67,7 +68,7 @@ def render():
     return html.Div([
         header("Manual Queue", "Lines no rule can place. Work through them "
                "one by one with the suggestions, or tick rows below and "
-               "assign in bulk."),
+               "assign in bulk.", help_key="spending.manual-queue"),
         html.Div([
             bar(
                 field("Group", dcc.RadioItems(
@@ -95,7 +96,7 @@ def render():
         ], style=theme.CARD),
 
         html.Div([
-            html.Div("One by one", style=theme.CARD_TITLE),
+            help_title("One by one", "spending.manual-queue.one-by-one"),
             html.Div(id=f"{P}-rv-line"),
             html.Div(id=f"{P}-rv-chips", style={"marginTop": "12px"}),
             html.Div([
@@ -138,7 +139,7 @@ def render():
         split_panel(P),
 
         html.Div([
-            html.Div("All pending lines", style=theme.CARD_TITLE),
+            help_title("All pending lines", "spending.manual-queue.all"),
             assign_bar(P, "Assign to selected", note=True, extra=[
                 html.Button("Select all", id=f"{P}-all", n_clicks=0,
                             style=btn()),
