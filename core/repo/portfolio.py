@@ -120,15 +120,49 @@ def transactions() -> pd.DataFrame:
     return df
 
 
+# Filter value for trades with no account. Not a possible account name: the
+# Data -> Accounts grid strips names, and no name starts with two underscores.
+NO_ACCOUNT = "__none__"
+# Filter value for instruments whose vehicle has not been set.
+NO_VEHICLE = "__none__"
+
+
+def _account_where(accounts, col="t.account") -> tuple[str, list]:
+    """SQL fragment and params for an account filter. NO_ACCOUNT matches a
+    NULL or blank account."""
+    names = [a for a in accounts if a != NO_ACCOUNT]
+    parts, params = [], []
+    if names:
+        parts.append(f"{col} IN ({','.join('?' * len(names))})")
+        params += names
+    if NO_ACCOUNT in accounts:
+        parts.append(f"({col} IS NULL OR TRIM({col}) = '')")
+    return "(" + " OR ".join(parts) + ")", params
+
+
+def _vehicle_where(vehicle, col="i.vehicle") -> tuple[str, list]:
+    if vehicle == NO_VEHICLE:
+        return f"({col} IS NULL OR TRIM({col}) = '')", []
+    return f"{col} = ?", [vehicle]
+
+
 def transactions_filtered(funds=None, date_from=None, date_to=None,
-                          txn_type=None) -> pd.DataFrame:
+                          txn_type=None, accounts=None,
+                          vehicle=None) -> pd.DataFrame:
     """Transactions for the Transactions tab, newest first, with optional
-    filters. Same commission handling as transactions()."""
+    filters. Same commission handling as transactions().
+
+    accounts: account names; NO_ACCOUNT selects trades with no account.
+    vehicle:  Stock / ETF / Fund / Other, NO_VEHICLE for not set, or
+              None / "ALL" for every instrument."""
+    from core.repo import standing
+    standing.ensure_vehicle_column()
     has_comm = _has_column("transactions", "commission")
     comm_sql = "t.commission" if has_comm else "0.0 AS commission"
     sql = [f"""
-        SELECT t.fund_id, t.trade_date, t.type, t.quantity, t.price,
-               t.currency, t.fx_rate, {comm_sql}, i.name, i.price_unit
+        SELECT t.fund_id, t.account, t.trade_date, t.type, t.quantity,
+               t.price, t.currency, t.fx_rate, {comm_sql}, i.name,
+               i.price_unit, i.vehicle
         FROM transactions t
         LEFT JOIN instruments i ON i.fund_id = t.fund_id
         WHERE 1 = 1
@@ -137,6 +171,12 @@ def transactions_filtered(funds=None, date_from=None, date_to=None,
     if funds:
         sql.append(f"AND t.fund_id IN ({','.join('?' * len(funds))})")
         params += list(funds)
+    if accounts:
+        frag, p = _account_where(accounts)
+        sql.append("AND " + frag); params += p
+    if vehicle and vehicle != "ALL":
+        frag, p = _vehicle_where(vehicle)
+        sql.append("AND " + frag); params += p
     if date_from:
         sql.append("AND t.trade_date >= ?"); params.append(date_from)
     if date_to:
@@ -155,18 +195,77 @@ def transaction_fund_ids() -> list:
     return df["fund_id"].tolist() if not df.empty else []
 
 
-def transaction_fund_options() -> list:
-    """Dropdown options for the Transactions filter: every fund that has been
-    traded, labelled with its instrument name."""
-    df = db.query("""
+def transaction_fund_options(accounts=None, vehicle=None) -> list:
+    """Dropdown options for the Transactions fund filter: every fund that has
+    been traded - in the given accounts and of the given vehicle, if any -
+    labelled with its instrument name."""
+    from core.repo import standing
+    standing.ensure_vehicle_column()
+    sql = ["""
         SELECT DISTINCT t.fund_id, i.name
         FROM transactions t LEFT JOIN instruments i ON i.fund_id = t.fund_id
-        ORDER BY COALESCE(i.name, t.fund_id)
-    """)
+        WHERE 1 = 1
+    """]
+    params = []
+    if accounts:
+        frag, p = _account_where(accounts)
+        sql.append("AND " + frag); params += p
+    if vehicle and vehicle != "ALL":
+        frag, p = _vehicle_where(vehicle)
+        sql.append("AND " + frag); params += p
+    sql.append("ORDER BY COALESCE(i.name, t.fund_id)")
+    df = db.query("\n".join(sql), tuple(params))
     if df.empty:
         return []
     return [{"label": r.name or r.fund_id, "value": r.fund_id}
             for r in df.itertuples()]
+
+
+def transaction_account_options() -> list:
+    """Dropdown options for the Transactions account filter.
+
+    Every account in Data -> Accounts, inactive ones included (their trades
+    are still history), in the grid's order; then any account name the
+    ledger uses that the accounts table lacks; then "(no account)" if some
+    trades have none."""
+    defined = db.query("SELECT name FROM accounts "
+                       "ORDER BY sort_order, name")
+    names = defined["name"].tolist() if not defined.empty else []
+    used = db.query("""
+        SELECT DISTINCT account FROM transactions
+        WHERE account IS NOT NULL AND TRIM(account) != ''
+        ORDER BY account
+    """)
+    seen = set(names)
+    for a in (used["account"].tolist() if not used.empty else []):
+        if a not in seen:
+            names.append(a)
+            seen.add(a)
+    out = [{"label": n, "value": n} for n in names]
+    blank = db.query("SELECT COUNT(*) AS n FROM transactions "
+                     "WHERE account IS NULL OR TRIM(account) = ''")
+    if not blank.empty and int(blank["n"].iloc[0]):
+        out.append({"label": "(no account)", "value": NO_ACCOUNT})
+    return out
+
+
+def transaction_vehicle_options() -> list:
+    """Vehicle filter options: All, then the standard vehicles, then "Not
+    set" while any traded instrument has none."""
+    from core.repo import standing
+    standing.ensure_vehicle_column()
+    plural = {"Stock": "Stocks", "ETF": "ETFs", "Fund": "Funds",
+              "Other": "Other"}
+    out = [{"label": "All", "value": "ALL"}]
+    out += [{"label": plural[v], "value": v} for v in standing.VEHICLES]
+    unset = db.query("""
+        SELECT COUNT(DISTINCT t.fund_id) AS n
+        FROM transactions t LEFT JOIN instruments i ON i.fund_id = t.fund_id
+        WHERE i.vehicle IS NULL OR TRIM(i.vehicle) = ''
+    """)
+    if not unset.empty and int(unset["n"].iloc[0]):
+        out.append({"label": "Not set", "value": NO_VEHICLE})
+    return out
 
 
 # --- Holdings -------------------------------------------------------------

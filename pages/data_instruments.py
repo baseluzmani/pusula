@@ -29,6 +29,8 @@ COLUMNS = [
     {"name": "Fund ID", "id": "fund_id", "editable": False},
     {"name": "Name", "id": "name", "editable": True},
     {"name": "Type", "id": "asset_type", "editable": True},
+    {"name": "Vehicle", "id": "vehicle", "editable": True,
+     "presentation": "dropdown"},
     {"name": "Currency", "id": "currency", "editable": True},
     {"name": "Price unit", "id": "price_unit", "editable": True},
     {"name": "Category", "id": "category", "editable": True},
@@ -135,6 +137,14 @@ def render():
             editable=True,
             sort_action="native",
             page_action="none",
+            # Vehicle: what kind of security the row is (Stock / ETF / Fund /
+            # Other), separate from the thematic Type. Drives the Vehicle
+            # filter on Portfolio -> Transactions.
+            dropdown={"vehicle": {
+                "options": [{"label": v, "value": v}
+                            for v in repo.VEHICLES],
+                "clearable": True,
+            }},
             style_table={"overflowX": "auto"},
             style_header={"backgroundColor": theme.INK, "color": "white",
                           "fontWeight": "600", "fontSize": "11px",

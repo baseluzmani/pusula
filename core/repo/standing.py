@@ -90,8 +90,40 @@ def account_usage() -> dict:
 
 # --- Instruments ----------------------------------------------------------
 
-INSTRUMENT_COLUMNS = ("name", "asset_type", "currency", "price_unit",
-                      "category", "active", "source", "source_id", "provider")
+INSTRUMENT_COLUMNS = ("name", "asset_type", "vehicle", "currency",
+                      "price_unit", "category", "active", "source",
+                      "source_id", "provider")
+
+# What kind of security a row is, independent of its thematic asset_type
+# (Tech-AI, Defence, Gold ... mix shares, ETFs and pension funds). Gold ETCs
+# and crypto ETPs count as ETF; cash, property, crypto coins, indices, FX and
+# futures are Other. scripts/seed_vehicle.py fills it in; Data -> Instruments
+# edits it.
+VEHICLES = ("Stock", "ETF", "Fund", "Other")
+
+_VEHICLE_READY: set = set()
+
+
+def ensure_vehicle_column() -> None:
+    """Add instruments.vehicle to an older database. Once per database per
+    process; existing rows are left blank until seeded or edited."""
+    key = str(db.config.DB_PATH)
+    if key in _VEHICLE_READY:
+        return
+    with db.get_conn() as conn:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(instruments)")}
+        if "vehicle" not in have:
+            conn.execute("ALTER TABLE instruments ADD COLUMN vehicle TEXT")
+    _VEHICLE_READY.add(key)
+
+
+def clean_vehicle(value):
+    """One of VEHICLES (case-insensitive, 'etf' -> 'ETF'), or None."""
+    text = (_clean(value) or "").lower()
+    for v in VEHICLES:
+        if v.lower() == text:
+            return v
+    return None
 
 
 def instruments(search: str = "", incomplete_only: bool = False,
@@ -104,8 +136,10 @@ def instruments(search: str = "", incomplete_only: bool = False,
         is treated as GBP pounds and passes through unconverted.
     held_only: only instruments with an open position or any transaction.
     """
+    ensure_vehicle_column()
     sql = ["""
-        SELECT i.fund_id, i.name, i.asset_type, i.currency, i.price_unit,
+        SELECT i.fund_id, i.name, i.asset_type, i.vehicle, i.currency,
+               i.price_unit,
                i.category, COALESCE(i.active, 1) AS active,
                i.source, i.source_id, i.provider,
                (SELECT COUNT(*) FROM prices p WHERE p.fund_id = i.fund_id)
@@ -135,7 +169,9 @@ def instruments(search: str = "", incomplete_only: bool = False,
 
 def save_instruments(rows: list) -> int:
     """Update instrument metadata. fund_id is the key and is never changed
-    here - re-keying an instrument would orphan its prices and transactions."""
+    here - re-keying an instrument would orphan its prices and transactions.
+    A vehicle outside VEHICLES is stored as blank."""
+    ensure_vehicle_column()
     written = 0
     with db.get_conn() as conn:
         for r in rows:
@@ -144,11 +180,12 @@ def save_instruments(rows: list) -> int:
                 continue
             conn.execute("""
                 UPDATE instruments
-                SET name = ?, asset_type = ?, currency = ?, price_unit = ?,
-                    category = ?, active = ?, source = ?, source_id = ?,
-                    provider = ?
+                SET name = ?, asset_type = ?, vehicle = ?, currency = ?,
+                    price_unit = ?, category = ?, active = ?, source = ?,
+                    source_id = ?, provider = ?
                 WHERE fund_id = ?
             """, (_clean(r.get("name")), _clean(r.get("asset_type")),
+                  clean_vehicle(r.get("vehicle")),
                   _clean(r.get("currency")), _clean(r.get("price_unit")),
                   _clean(r.get("category")), _int(r.get("active"), 1),
                   _clean(r.get("source")), _clean(r.get("source_id")),

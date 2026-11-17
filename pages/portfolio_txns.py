@@ -5,8 +5,13 @@ A filterable ledger of every trade, with live pricing per row: what the
 position cost in GBP, what it is worth now, and the resulting P&L. Read-only -
 entering transactions lives on the Portfolio tab.
 
-Filters: fund (multi-select), date from (defaults to the start of the current
-month), date to, and type.
+Filters: account (multi-select, inactive accounts included, plus "(no
+account)" when some trades have none), vehicle (Stock / ETF / Fund / Other,
+from instruments.vehicle - set on Data -> Instruments), fund (multi-select,
+narrowed to the funds traded in the chosen accounts and vehicle), date from
+(defaults to the start of the current month), date to, and type. The totals
+row adds up whatever the filters leave, so it gives the P&L of one account or
+of single stocks only.
 
 Performance
 -----------
@@ -30,7 +35,7 @@ from __future__ import annotations
 from datetime import date
 
 import dash
-from dash import html, dcc, callback, Input, Output
+from dash import html, dcc, callback, Input, Output, State
 import pandas as pd
 
 from core import theme, finance as fin
@@ -39,8 +44,10 @@ from core.repo import portfolio as repo
 TYPE_COLOURS = {"BUY": "#2E6FB5", "SELL": theme.NEGATIVE,
                 "DIVIDEND": theme.POSITIVE}
 
-COLUMNS = ["Date", "Fund", "Type", "Qty", "Price", "Cost GBP", "Commission",
-           "Latest price", "Value GBP", "P&L GBP", "P&L %"]
+COLUMNS = ["Date", "Fund", "Account", "Type", "Qty", "Price", "Cost GBP",
+           "Commission", "Latest price", "Value GBP", "P&L GBP", "P&L %"]
+# Left-aligned text columns at the start of the table.
+TEXT_COLUMNS = 3
 
 
 def _month_start() -> str:
@@ -61,6 +68,14 @@ def render():
         ], style={"marginBottom": "12px"}),
 
         html.Div([
+            _field("Account", dcc.Dropdown(
+                id="ptx-account", options=repo.transaction_account_options(),
+                multi=True, placeholder="All accounts\u2026",
+                style={"fontSize": "12px", "minWidth": "220px"}), "220px"),
+            _field("Vehicle", dcc.Dropdown(
+                id="ptx-vehicle", clearable=False, value="ALL",
+                options=repo.transaction_vehicle_options(),
+                style={"fontSize": "12px", "width": "120px"}), "120px"),
             _field("Fund", dcc.Dropdown(
                 id="ptx-fund", options=repo.transaction_fund_options(),
                 multi=True, placeholder="All funds\u2026",
@@ -100,13 +115,30 @@ def _field(label, control, width):
 
 
 @callback(
+    Output("ptx-fund", "options"), Output("ptx-fund", "value"),
+    Input("ptx-account", "value"), Input("ptx-vehicle", "value"),
+    State("ptx-fund", "value"),
+    prevent_initial_call=True,
+)
+def _fund_options(accounts, vehicle, funds):
+    """Narrow the fund list to what was traded in the chosen accounts and
+    vehicle, and drop any picked fund that is no longer in it."""
+    options = repo.transaction_fund_options(accounts or None, vehicle)
+    valid = {o["value"] for o in options}
+    kept = [f for f in (funds or []) if f in valid]
+    return options, kept
+
+
+@callback(
     Output("ptx-table", "children"),
     Input("ptx-fund", "value"), Input("ptx-from", "date"),
     Input("ptx-to", "date"), Input("ptx-type", "value"),
+    Input("ptx-account", "value"), Input("ptx-vehicle", "value"),
 )
-def _table(funds, date_from, date_to, txn_type):
+def _table(funds, date_from, date_to, txn_type, accounts, vehicle):
     txns = repo.transactions_filtered(funds or None, date_from, date_to,
-                                      txn_type)
+                                      txn_type, accounts=accounts or None,
+                                      vehicle=vehicle)
     if txns.empty:
         return _msg("No transactions match these filters.")
 
@@ -151,7 +183,7 @@ def _header():
     return html.Thead(html.Tr([
         html.Th(c, style={"background": theme.INK, "color": "#fff",
                 "padding": "6px 10px", "fontSize": "10px", "fontWeight": 600,
-                "textAlign": "left" if i < 2 else "right",
+                "textAlign": "left" if i < TEXT_COLUMNS else "right",
                 "whiteSpace": "nowrap", "position": "sticky", "top": 0,
                 "zIndex": 1})
         for i, c in enumerate(COLUMNS)]))
@@ -190,6 +222,10 @@ def _row(t, instruments, price_map, gbpusd, rates, totals):
 
     name = t["name"] or fid
     disp = name if len(name) <= 30 else name[:30] + "\u2026"
+    # A trade with no account reads back as NaN (pandas 3), not None.
+    raw_acc = t.get("account")
+    account = raw_acc.strip() if isinstance(raw_acc, str) else ""
+    acc_disp = account if len(account) <= 22 else account[:22] + "\u2026"
     pnl_col = theme.POSITIVE if (pnl or 0) >= 0 else theme.NEGATIVE
     cost_col = theme.POSITIVE if signed_cost >= 0 else theme.NEGATIVE
     val_col = theme.POSITIVE if (signed_value or 0) >= 0 else theme.NEGATIVE
@@ -201,6 +237,9 @@ def _row(t, instruments, price_map, gbpusd, rates, totals):
         html.Td(html.Span(disp, title=name),
                 style={"padding": "4px 10px", "fontSize": "12px",
                        "color": theme.INK, "whiteSpace": "nowrap"}),
+        html.Td(html.Span(acc_disp or "\u2014", title=account or None),
+                style={"padding": "4px 10px", "fontSize": "11px",
+                       "color": theme.SLATE, "whiteSpace": "nowrap"}),
         _td(ttype, colour=TYPE_COLOURS.get(ttype, theme.TEXT), weight=600,
             mono=False),
         _td(_fmt_qty(signed_qty), colour=theme.SLATE),
@@ -256,7 +295,7 @@ def _totals_row(totals):
             **theme.NUM, "fontWeight": 700,
             "borderTop": f"2px solid {theme.INK}"}
     return html.Tr([
-        html.Td("TOTAL", colSpan=5, style={**base, "textAlign": "left"}),
+        html.Td("TOTAL", colSpan=6, style={**base, "textAlign": "left"}),
         html.Td(f"{cost:+,.0f}", style={**base, "color":
                 theme.POSITIVE if cost >= 0 else theme.NEGATIVE}),
         html.Td(f"{comm:,.2f}", style={**base, "color": theme.SLATE}),
