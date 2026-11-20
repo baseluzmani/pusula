@@ -21,14 +21,16 @@ All of them stay editable - they are starting values, not constraints.
 
 from __future__ import annotations
 
+import base64
 from datetime import date
 
 import dash
 from dash import html, dcc, callback, Input, Output, State, ctx, ALL, no_update
 import pandas as pd
 
-from core import theme
+from core import background, theme
 from core.repo import entry as repo
+from core.repo import pension_import as pen
 from core.repo import standing, portfolio as pf
 from ui.help import help_title, help_icon
 
@@ -56,8 +58,13 @@ def render():
                      "width": "360px"}),
         ], style={"display": "flex", "alignItems": "flex-start"}),
 
+        _pension_panel(),
+
         dcc.Store(id="in-editing", data=None),
         dcc.Store(id="in-refresh", data=0),
+        dcc.Store(id="in-pen-data", data=None),
+        dcc.Store(id="in-pen-close", data=[]),
+        dcc.Store(id="in-pen-maprev", data=0),
     ])
 
 
@@ -506,6 +513,251 @@ def _delete_cash(clicks, refresh):
         return no_update, no_update
     repo.delete_cash(trigger["id"])
     return _msg("Cash line removed."), refresh + 1
+
+
+# --- pension statement import ---------------------------------------------
+#
+# One CSV from the pension provider - a switch or a monthly contribution -
+# becomes a set of composite BUY/SELL transactions. The logic lives in
+# core/repo/pension_import.py; this is the upload, the preview and the button.
+
+def _pension_panel():
+    accounts = standing.account_options()
+    default = (pen.DEFAULT_ACCOUNT
+               if any(o["value"] == pen.DEFAULT_ACCOUNT for o in accounts)
+               else None)
+    return html.Div([
+        help_title("Pension statement import", "portfolio.inputs.pension"),
+        html.Div("Upload the provider's transaction-details CSV - a switch "
+                 "or a monthly contribution. Each fund's £ value is "
+                 "turned into units at Pusula's own composite price. "
+                 "Nothing is written until you press Import.",
+                 style={"fontSize": "11.5px", "color": theme.NEUTRAL,
+                        "marginBottom": "10px"}),
+        html.Div([
+            dcc.Upload(
+                id="in-pen-upload", multiple=False, accept=".csv",
+                children=html.Div(["Drop the CSV here or ",
+                                   html.Span("choose a file", style={
+                                       "color": "#2E6FB5",
+                                       "textDecoration": "underline"})]),
+                style={"width": "260px", "padding": "14px 12px",
+                       "border": f"1px dashed {theme.NEUTRAL}",
+                       "borderRadius": "6px", "textAlign": "center",
+                       "fontSize": "12.5px", "color": theme.SLATE,
+                       "cursor": "pointer", "background": theme.CANVAS}),
+            _field("Account", dcc.Dropdown(
+                id="in-pen-account", options=accounts, value=default,
+                placeholder="Account…", clearable=False,
+                style={"fontSize": "12px"}), "170px"),
+            _field("Trade date", dcc.DatePickerSingle(
+                id="in-pen-date", date=None, placeholder="From the file",
+                display_format="DD MMM YYYY"), None),
+        ], style={"display": "flex", "flexWrap": "wrap", "gap": "12px",
+                  "alignItems": "flex-end"}),
+        html.Div(id="in-pen-preview", style={"marginTop": "12px",
+                                             "overflowX": "auto"}),
+    ], style={**theme.CARD, "marginTop": "12px"})
+
+
+def _decode(contents: str) -> str:
+    raw = base64.b64decode(contents.split(",", 1)[1])
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return raw.decode("cp1252", errors="replace")
+
+
+@callback(
+    Output("in-pen-data", "data"), Output("in-pen-date", "date"),
+    Output("in-pen-close", "data", allow_duplicate=True),
+    Input("in-pen-upload", "contents"), State("in-pen-upload", "filename"),
+    prevent_initial_call=True,
+)
+def _pen_upload(contents, filename):
+    if not contents:
+        return no_update, no_update, no_update
+    rows, problems = pen.parse_csv(_decode(contents))
+    net, trade_date = pen.aggregate(rows)
+    data = {"file": filename, "rows": len(rows), "problems": problems,
+            "net": [[k, v] for k, v in net.items()]}
+    return data, trade_date or no_update, []
+
+
+@callback(
+    Output("in-pen-preview", "children"),
+    Input("in-pen-data", "data"), Input("in-pen-account", "value"),
+    Input("in-pen-date", "date"), Input("in-pen-close", "data"),
+    Input("in-pen-maprev", "data"), Input("in-refresh", "data"),
+)
+def _pen_preview(data, account, trade_date, close, _rev, _refresh):
+    if not data:
+        return None
+    if not data["net"]:
+        return html.P(f"No fund rows found in {data['file']}.",
+                      style={"color": theme.NEGATIVE, "fontSize": "12px"})
+    if not trade_date:
+        return html.P("Pick a trade date.",
+                      style={"color": theme.NEUTRAL, "fontSize": "12px"})
+    p = pen.plan(dict(data["net"]), trade_date, account, close or [])
+    return _pen_table(p, data)
+
+
+def _pen_table(p, data):
+    names = {k: v.get("name") or k for k, v in pf.instruments().items()}
+    options = None                                  # built only if needed
+
+    head = html.Thead(html.Tr([
+        html.Th(c, style={"background": theme.INK, "color": "#fff",
+                "padding": "5px 8px", "fontSize": "10px", "fontWeight": 600,
+                "textAlign": "left" if i < 2 or i == 7 else "right",
+                "whiteSpace": "nowrap"})
+        for i, c in enumerate(["Provider fund", "Composite", "£ (file)",
+                               "Price", "Units", "Type", "Close fully",
+                               "Notes"])]))
+
+    rows = []
+    for l in p["lines"]:
+        if l["fund_id"]:
+            comp = html.Span(names.get(l["fund_id"], l["fund_id"]),
+                             title=l["fund_id"])
+        else:
+            options = options or pen.composite_options()
+            comp = dcc.Dropdown(id={"type": "in-pen-map", "name": l["name"]},
+                                options=options, placeholder="Map to…",
+                                style={"fontSize": "11px", "width": "220px"})
+
+        value = f"{l['value']:,.2f}"
+        if abs(l["value_used"] - l["value"]) >= 0.005:
+            value = html.Span([value, html.Br(), html.Span(
+                f"{l['value_used']:,.2f} used",
+                style={"color": theme.NEEDLE, "fontSize": "10px"})])
+
+        price = (html.Span([f"{l['price']:,.4f}", html.Span(
+            f"  {pd.Timestamp(l['price_date']):%d %b}",
+            style={"color": theme.NEUTRAL, "fontSize": "10px"})])
+            if l["price"] else "—")
+
+        close = ""
+        if l["type"] == "SELL" and l["fund_id"] and l["price"]:
+            close = dcc.Checklist(
+                id={"type": "in-pen-closebox", "fund": l["fund_id"]},
+                options=[{"label": "", "value": "close"}],
+                value=["close"] if l["close"] else [],
+                style={"display": "inline-block"})
+
+        colour = "#2E6FB5" if l["type"] == "BUY" else theme.NEGATIVE
+        rows.append(html.Tr([
+            html.Td(l["name"], style=_td(theme.INK, "left")),
+            html.Td(comp, style=_td(theme.SLATE, "left")),
+            html.Td(value, style=_td(theme.TEXT)),
+            html.Td(price, style=_td(theme.SLATE)),
+            html.Td(f"{l['quantity']:,.4f}" if l["quantity"] else "—",
+                    style=_td(theme.TEXT)),
+            html.Td(l["type"], style={**_td(colour), "fontWeight": 600}),
+            html.Td(close, style=_td(theme.TEXT)),
+            html.Td(" · ".join(l["warnings"]),
+                    style={**_td(theme.NEGATIVE, "left"),
+                           "whiteSpace": "normal", "minWidth": "220px"}),
+        ], style={"borderBottom": f"1px solid {theme.LINE}"}))
+
+    rows.append(html.Tr([
+        html.Td("Net", style={**_td(theme.INK, "left"), "fontWeight": 700}),
+        html.Td(""),
+        html.Td(f"{p['net']:,.2f}", style={**_td(theme.INK),
+                                            "fontWeight": 700}),
+        html.Td(""), html.Td(""), html.Td(""), html.Td(""), html.Td(""),
+    ]))
+
+    kind = ("Contribution" if all(l["type"] == "BUY" for l in p["lines"])
+            else "Switch")
+    info = (f"{kind} · {data['rows']} rows from {data['file']} netted "
+            f"into {len(p['lines'])} funds")
+    notes = [html.Div(info, style={"fontSize": "11.5px", "color": theme.SLATE,
+                                   "marginBottom": "8px"})]
+    for msg in data.get("problems", []) + p["blocking"]:
+        notes.append(html.Div(msg, style={"fontSize": "11.5px",
+                     "color": theme.NEGATIVE, "marginBottom": "4px"}))
+
+    blocked = bool(p["blocking"])
+    button = html.Button(
+        f"Import {len(p['lines'])} transactions", id="in-pen-import",
+        n_clicks=0, disabled=blocked,
+        style={**_btn(primary=not blocked), "marginTop": "10px",
+               **({"cursor": "not-allowed", "opacity": 0.6}
+                  if blocked else {})})
+
+    return html.Div([
+        *notes,
+        html.Table([head, html.Tbody(rows)],
+                   style={"width": "100%", "borderCollapse": "collapse"}),
+        button,
+    ])
+
+
+@callback(
+    Output("in-pen-close", "data"),
+    Input({"type": "in-pen-closebox", "fund": ALL}, "value"),
+    State({"type": "in-pen-closebox", "fund": ALL}, "id"),
+    State("in-pen-close", "data"),
+    prevent_initial_call=True,
+)
+def _pen_close(values, ids, current):
+    # The preview redraws these boxes every time; returning no_update when
+    # nothing changed stops a redraw from triggering another redraw.
+    chosen = sorted(i["fund"] for v, i in zip(values, ids) if v)
+    if chosen == sorted(current or []):
+        return no_update
+    return chosen
+
+
+@callback(
+    Output("in-pen-maprev", "data"),
+    Input({"type": "in-pen-map", "name": ALL}, "value"),
+    State({"type": "in-pen-map", "name": ALL}, "id"),
+    State("in-pen-maprev", "data"),
+    prevent_initial_call=True,
+)
+def _pen_map(values, ids, rev):
+    saved = 0
+    for value, ident in zip(values, ids):
+        if value:
+            pen.save_mapping(ident["name"], value)
+            saved += 1
+    return (rev or 0) + 1 if saved else no_update
+
+
+@callback(
+    Output("in-status", "children", allow_duplicate=True),
+    Output("in-refresh", "data", allow_duplicate=True),
+    Output("in-pen-data", "data", allow_duplicate=True),
+    Output("in-pen-close", "data", allow_duplicate=True),
+    Input("in-pen-import", "n_clicks"),
+    State("in-pen-data", "data"), State("in-pen-account", "value"),
+    State("in-pen-date", "date"), State("in-pen-close", "data"),
+    State("in-refresh", "data"),
+    prevent_initial_call=True,
+)
+def _pen_import(n, data, account, trade_date, close, refresh):
+    if not n or not data or not trade_date:
+        return (no_update,) * 4
+    # Planned again from the stored file rather than trusting what is on
+    # screen, so the write always matches the current prices and holdings.
+    p = pen.plan(dict(data["net"]), trade_date, account, close or [])
+    try:
+        result = pen.write(p)
+    except Exception as exc:                                   # noqa: BLE001
+        return (_msg(f"Import failed: {exc}", False), no_update, no_update,
+                no_update)
+
+    background.start(["scripts/rebuild_history.py", "--apply"],
+                     "rebuild_history")
+    backup = result["backup"].rsplit("/", 1)[-1]
+    return (_msg(f"Imported {result['written']} transactions on "
+                 f"{trade_date} (net £{p['net']:,.2f}). Backup "
+                 f"{backup}. Snapshot history is rebuilding in the "
+                 f"background."),
+            (refresh or 0) + 1, None, [])
 
 
 def _msg(text, ok=True):

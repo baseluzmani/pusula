@@ -129,3 +129,9 @@ The latest trades. Edit or delete one from here.
 ### Cash {#cash}
 
 Cash balances per account and currency.
+
+### Pension statement import {#pension}
+
+Turns the pension provider's transaction-details CSV - a fund switch or a monthly contribution - into transactions on the HSBC pension composites.
+
+Each fund's pound value in the file is turned into units at Pusula's own composite price on the trade date; the provider's own units are not used. Check the preview, tick Close fully on a fund you have sold completely, then press Import. A backup is taken first and the history rebuilds itself afterwards.
